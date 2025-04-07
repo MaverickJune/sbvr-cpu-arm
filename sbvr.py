@@ -84,34 +84,36 @@ class sbvr():
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
-        data_65 = torch.quantile(data, 0.65)
+        data_97 = torch.quantile(data, 0.97)
 
         min_mse = 1e10
-        r_max = math.pi*2/3
-        r_gran = (r_max - 1.0) / 32
-        b_gran = (data_avg - data_min) / 16
-        s_gran = (data_max - data_65) / 128
-        print(r_str("\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
-              f"{r_max:.4e}, " +
+        r_max = math.pi*2/3 + 0.1
+        r_min = 1.0
+        r_gran = (r_max - r_min) / 64
+        b_max = data_avg
+        b_min = data_min - (abs(data_min)*0.1)
+        b_gran = (b_max - b_min) / 32
+        s_max = (data_max - data_min) * 1.1
+        s_min = (data_97 - data_avg) * 2
+        s_gran = (s_max - s_min) / 32
+        print(g_str("\tData max: ") + f"{data_max:.4e}" +
+              ", " + g_str("avg: ") + f"{data_avg:.4e}" +
+              ", " + g_str("min: ") + f"{data_min:.4e}")
+        print(r_str("\tR search range: ") + f"{r_min:.4e} to {r_max:.4e}, " +
               r_str("search granularity: ") + f"{r_gran:.4e}")
-        print(r_str("\tBias search range: ") + f"{data_min:.4e} to " + 
-              f"{data_avg:.4e}, " +
+        print(r_str("\tBias search range: ") + f"{b_min:.4e} to {b_max:.4e}, " +
               r_str("search granularity: ") + f"{b_gran:.4e}")
-        print(r_str("\tScale search range: ") + f"{data_65 - data_avg:.4e} to " +
-              f"{(data_max - data_avg):.4e}, " +
-              r_str("search granularity: ") + f"{s_gran:.4e}")
+        print(r_str("\tScale search range: ") + f"{s_min:.4e} to {s_max:.4e}, "
+              + r_str("search granularity: ") + f"{s_gran:.4e}")
         
-        for r in torch.arange(1.0 + r_gran, r_max, r_gran):
+        for r in torch.arange(r_min + r_gran, r_max, r_gran):
             coeff = torch.tensor([r**i for i in range(self.num_sums)],
                 dtype=data.dtype, device=data.device)
             coeff_sum = torch.sum(coeff)
             coeff_norm = coeff / coeff_sum
-            for scale in \
-                torch.arange((data_65 - data_avg), 
-                             (data_max - data_avg) + s_gran, s_gran):
-                coeff = coeff_norm * (2 * scale)
-                for coeff_bias in \
-                    torch.arange(data_min, data_avg + b_gran, b_gran):
+            for scale in torch.arange(s_min, s_max + s_gran, s_gran):
+                coeff = coeff_norm * scale
+                for coeff_bias in torch.arange(b_min, b_max + b_gran, b_gran):
                     coeff_bias = coeff_bias.to(data.dtype)
                     mse, predicted, coeff_idx, all_points = \
                         self.__return_coeff_mse(data, coeff_bias, coeff)
@@ -126,8 +128,10 @@ class sbvr():
                         best_s = scale
         print (g_str("Best MSE: ") + f"{min_mse:.4e}" +
                ", " + g_str("Coeff: ") + str(best_coeff) +
-                ", " + g_str("(r, b, s): ") + f"{best_r:.4e}, "
-                f"{best_bias.item():.4e}, {best_s:.4e}")
+                ", " + g_str("(r, b, s): ") + f"{best_r:.4e}, " +
+                f"{best_bias.item():.4e}, {best_s:.4e}" +
+                ", " + g_str("Num points: ") + 
+                f"{torch.unique(all_points).numel()}")
         print(y_str("all_points: ") + str(torch.sort(best_all_points)[0]) +
               y_str("\nOriginal Data: ") + str(data) +
               y_str("\nMapped Data: ") + str(best_predicted))
@@ -193,7 +197,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(0)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-mat_size = (8, 8)
+mat_size = (16, 16)
 
 mat_a = torch.randn(mat_size, dtype=torch.float64).to(device)
 mat_b = torch.randn(mat_size, dtype=torch.float64).to(device)
