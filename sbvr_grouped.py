@@ -6,7 +6,7 @@ import sys
 import datetime
 
 from sbvr_utils.utils_llama import get_llama, get_layer_ffn_weight
-from sbvr_utils.log_config import get_logger
+from sbvr_utils.log_config import get_logger, ExtLogger
 logger = get_logger(__name__)
 
 def r_str(s):
@@ -62,6 +62,19 @@ def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
             if kwargs.get("num_sums", None) is not None:
                 log_file.write(f"Num Sums: {kwargs['num_sums']}\n")
             log_file.write(log_text)
+            
+
+def get_errors(tensor1, tensor2):
+    if tensor1.shape != tensor2.shape:
+        raise ValueError("Tensors must have the same shape")
+    
+    errors = tensor1 - tensor2
+    mse = torch.mean(errors ** 2).item()
+    max_error = torch.max(errors).item()
+    min_error = torch.min(errors).item()
+    std_dev = torch.std(errors).item()
+    
+    return mse, max_error, min_error, std_dev
         
     
 def f64_matmul(mat_a, mat_b):
@@ -223,7 +236,7 @@ class sbvr():
                                      device=self.coeff.device)
         
         for i in range(num_coeff_groups):
-            logger.info(f"Encoding group {i + 1}/{num_coeff_groups}")
+            # logger.info(f"Encoding group {i + 1}/{num_coeff_groups}")
             group_start = i * self.coeff_group_size
             group_end = \
                 min(group_start + self.coeff_group_size, data_num)
@@ -336,23 +349,50 @@ def test_with_llama3_weight():
     logger.info(f"ffn_weight dtype: {ffn_weight.dtype}")
     logger.info(f"ffn_weight device: {ffn_weight.device}")
     
-    restored_weight_sbvr_10 = sbvr(ffn_weight, num_sums=10).get_decoded_tensor()
-    restored_weight_sbvr_8 = sbvr(ffn_weight, num_sums=8).get_decoded_tensor()
-    restored_weight_sbvr_6 = sbvr(ffn_weight, num_sums=6).get_decoded_tensor()
-    restored_weight_sbvr_4 = sbvr(ffn_weight, num_sums=4).get_decoded_tensor()
-    restored_weight_sbvr_2 = sbvr(ffn_weight, num_sums=2).get_decoded_tensor()
+    ext_logger = ExtLogger("llama3_weight_test.txt")
     
-    print(b_str("Case 1: Conversion to sbvr 10 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_10, log_ext=True, num_sums=10)
-    print(b_str("Case 2: Conversion to sbvr 8 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_8, log_ext=True, num_sums=8)
-    print(b_str("Case 3: Conversion to sbvr 6 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_6, log_ext=True, num_sums=6)
-    print(b_str("Case 4: Conversion to sbvr 4 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_4, log_ext=True, num_sums=4)
-    print(b_str("Case 5: Conversion to sbvr 2 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_2, log_ext=True, num_sums=2)
-    
+    def random_fetcher_test(fetch_unit:int = 16, n_fetches:int = 60, weight:torch.Tensor = None):
+        if weight is None:
+            raise ValueError("weight cannot be None")
+        if fetch_unit > weight.shape[0] or fetch_unit > weight.shape[1]:
+            raise ValueError("fetch_unit must be smaller than weight shape")
+        
+        ext_logger.write(f"Fetch Unit: {fetch_unit}")
+        ext_logger.write(f"Number of Fetches: {n_fetches}\n")
+        
+        fetch_r_indices = torch.randint(0, weight.shape[0] - fetch_unit + 1, (n_fetches,), device=weight.device)
+        fetch_c_indices = torch.randint(0, weight.shape[1] - fetch_unit + 1, (n_fetches,), device=weight.device)
+        
+        num_sums_list = [10, 8, 6, 4, 2]
+        for num_sums in num_sums_list:
+            ext_logger.write(f"Num Sums: {num_sums}\n")
+            mse_list = []
+            for i in range(n_fetches):
+                r_start = fetch_r_indices[i]
+                r_end = min(r_start + fetch_unit, weight.shape[0])
+                c_start = fetch_c_indices[i]
+                c_end = min(c_start + fetch_unit, weight.shape[1])
+                weight_fetch = weight[r_start:r_end, c_start:c_end]
+                
+                logger.info(f"shape of weight_fetch: {weight_fetch.shape}")
+                
+                restored_weight_sbvr = sbvr(weight_fetch, num_sums=num_sums).get_decoded_tensor()
+                
+                mse, max_error, min_error, std_dev = get_errors(weight_fetch, restored_weight_sbvr)
+                mse_list.append(mse)
+                log_text = (
+                    f"Fetch {i + 1}/{n_fetches} (num_sums={num_sums}): "
+                    f"MSE: {mse:.8e}, "
+                    f"Max Error: {max_error:.4e}, "
+                    f"Min Error: {min_error:.4e}, "
+                    f"Std Dev: {std_dev:.4e}"
+                )
+                ext_logger.write(log_text + "\n")
+            ext_logger.write(f"Average mse: {sum(mse_list)/len(mse_list):.8e}")
+            ext_logger.write("\n")
+            
+    random_fetcher_test(fetch_unit=16, n_fetches=60, weight=ffn_weight)
+    logger.info("Test completed. Check the log file for details.")
     
 if __name__ == "__main__":
     # randn_test()
