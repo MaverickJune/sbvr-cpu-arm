@@ -112,9 +112,9 @@ class sbvr():
         print(g_str("\tSearch space shape: ") + str(search_space.shape))
 
         len_search_space = search_space.shape[0]
-        search_range = 256
+        search_range = 64
         
-        print(g_str("\tDiff matrix size: ") + str(search_range * (2**self.num_sums) * data.shape[0] * b_list.shape[0] * 4 / 1024 / 1024 / 1024) + " GB")
+        print(g_str("\tDiff matrix size: ") + str(search_range * (2**self.num_sums) * data.shape[0] * b_list.shape[0] * data.element_size() / 1024 / 1024 / 1024) + " GB")
 
         # Loop over the bias values
         for search_start in range(0, len_search_space, search_range):
@@ -235,7 +235,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(0)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-mat_size = (8, 8)
+mat_size = (16, 16)
 
 mat_a = torch.randn(mat_size, dtype=torch.float64).to(device)
 mat_b = torch.randn(mat_size, dtype=torch.float64).to(device)
