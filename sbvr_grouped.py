@@ -1,6 +1,13 @@
 import torch
 import itertools
 import math
+import os
+import sys
+import datetime
+
+from bvq_utils.utils_llama import get_llama, get_layer_ffn_weight
+from bvq_utils.log_config import get_logger
+logger = get_logger(__name__)
 
 def r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
@@ -16,7 +23,7 @@ def print_tensor(tensor, name="Tensor"):
           + g_str("shape: ") + str(tensor.shape))
     print(tensor)
     
-def print_errors(tensor1, tensor2):
+def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
     if tensor1.shape != tensor2.shape:
         raise ValueError("Tensors must have the same shape")
     
@@ -30,6 +37,32 @@ def print_errors(tensor1, tensor2):
           y_str("Max: ") + f"{max_error:.4e}" + ", " +
           y_str("Min: ") + f"{min_error:.4e}" + ", " +
           y_str("Std. Dev.: ") + f"{std_dev:.4e}")
+    
+    if log_ext:
+        curr_dir = os.path.dirname(os.path.abspath(__file__))
+        curr_datetime = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = os.path.join(curr_dir, "logs", f"error.log")
+        parent_dir = os.path.dirname(log_path)
+        os.makedirs(parent_dir, exist_ok=True)
+        
+        if not os.path.exists(log_path):
+            with open(log_path, "w") as f:
+                pass
+        
+        log_text = (
+            r_str("Errors: ") +
+            y_str("Mean: ") + f"{mse:.4e}" + ", " +
+            y_str("Max: ") + f"{max_error:.4e}" + ", " +
+            y_str("Min: ") + f"{min_error:.4e}" + ", " +
+            y_str("Std. Dev.: ") + f"{std_dev:.4e}"
+        )
+        
+        with open(log_path, "a") as log_file:
+            print(f"Timestamp: {curr_datetime} \n", file=log_file)
+            if kwargs.get("num_sums", None) is not None:
+                print(f"Num Sums: {kwargs['num_sums']}", file=log_file)
+            print(log_text, file=log_file)
+        
     
 def f64_matmul(mat_a, mat_b):
     if mat_a.shape[1] != mat_b.shape[0]:
@@ -230,63 +263,94 @@ class sbvr():
         return info_str
 
 
-torch.manual_seed(0)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(0)
+def randn_test():
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(0)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-mat_size = (16, 16)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    mat_size = (16, 16)
 
-mat_a = torch.randn(mat_size, dtype=torch.float64).to(device)
-mat_b = torch.randn(mat_size, dtype=torch.float64).to(device)
-print_tensor(mat_a, "mat_a")
-print_tensor(mat_b, "mat_b")
+    mat_a = torch.randn(mat_size, dtype=torch.float64).to(device)
+    mat_b = torch.randn(mat_size, dtype=torch.float64).to(device)
+    print_tensor(mat_a, "mat_a")
+    print_tensor(mat_b, "mat_b")
 
-mat_c_64 = f64_matmul(mat_a, mat_b)
-mat_c_32 = f64_matmul(mat_a.to(torch.float32), mat_b.to(torch.float32))
-mat_c_16 = f64_matmul(mat_a.to(torch.float16), mat_b.to(torch.float16))
-mat_c_bf16 = f64_matmul(mat_a.to(torch.bfloat16), mat_b.to(torch.bfloat16))
-mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), mat_b.to(torch.float8_e4m3fn))
-mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), mat_b.to(torch.float8_e5m2))
-mat_c_sbvr_10 = f64_matmul(sbvr(mat_a, num_sums=10).get_decoded_tensor(), 
-                        sbvr(mat_b, num_sums=10).get_decoded_tensor())
-mat_c_sbvr_8 = f64_matmul(sbvr(mat_a, num_sums=8).get_decoded_tensor(), 
-                        sbvr(mat_b, num_sums=8).get_decoded_tensor())
-mat_c_sbvr_6 = f64_matmul(sbvr(mat_a, num_sums=6).get_decoded_tensor(), 
-                        sbvr(mat_b, num_sums=6).get_decoded_tensor())
-mat_c_sbvr_4 = f64_matmul(sbvr(mat_a, num_sums=4).get_decoded_tensor(), 
-                        sbvr(mat_b, num_sums=4).get_decoded_tensor())
-mat_c_sbvr_2 = f64_matmul(sbvr(mat_a, num_sums=2).get_decoded_tensor(), 
-                        sbvr(mat_b, num_sums=2).get_decoded_tensor())
+    mat_c_64 = f64_matmul(mat_a, mat_b)
+    mat_c_32 = f64_matmul(mat_a.to(torch.float32), mat_b.to(torch.float32))
+    mat_c_16 = f64_matmul(mat_a.to(torch.float16), mat_b.to(torch.float16))
+    mat_c_bf16 = f64_matmul(mat_a.to(torch.bfloat16), mat_b.to(torch.bfloat16))
+    mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), mat_b.to(torch.float8_e4m3fn))
+    mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), mat_b.to(torch.float8_e5m2))
+    mat_c_sbvr_10 = f64_matmul(sbvr(mat_a, num_sums=10).get_decoded_tensor(), 
+                            sbvr(mat_b, num_sums=10).get_decoded_tensor())
+    mat_c_sbvr_8 = f64_matmul(sbvr(mat_a, num_sums=8).get_decoded_tensor(), 
+                            sbvr(mat_b, num_sums=8).get_decoded_tensor())
+    mat_c_sbvr_6 = f64_matmul(sbvr(mat_a, num_sums=6).get_decoded_tensor(), 
+                            sbvr(mat_b, num_sums=6).get_decoded_tensor())
+    mat_c_sbvr_4 = f64_matmul(sbvr(mat_a, num_sums=4).get_decoded_tensor(), 
+                            sbvr(mat_b, num_sums=4).get_decoded_tensor())
+    mat_c_sbvr_2 = f64_matmul(sbvr(mat_a, num_sums=2).get_decoded_tensor(), 
+                            sbvr(mat_b, num_sums=2).get_decoded_tensor())
 
-print_tensor(mat_c_64, "mat_c")
-print_tensor(mat_c_16, "mat_c_16")
-print_tensor(mat_c_bf16, "mat_c_bf16")
-print_tensor(mat_c_e4m3fn, "mat_c_e4m3fn")
-print_tensor(mat_c_e5m2, "mat_c_e5m2")
-print_tensor(mat_c_sbvr_10, "mat_c_sbvr_10")
-print_tensor(mat_c_sbvr_8, "mat_c_sbvr_8")
-print_tensor(mat_c_sbvr_6, "mat_c_sbvr_6")
-print_tensor(mat_c_sbvr_4, "mat_c_sbvr_4")
-print_tensor(mat_c_sbvr_2, "mat_c_sbvr_2")
+    print_tensor(mat_c_64, "mat_c")
+    print_tensor(mat_c_16, "mat_c_16")
+    print_tensor(mat_c_bf16, "mat_c_bf16")
+    print_tensor(mat_c_e4m3fn, "mat_c_e4m3fn")
+    print_tensor(mat_c_e5m2, "mat_c_e5m2")
+    print_tensor(mat_c_sbvr_10, "mat_c_sbvr_10")
+    print_tensor(mat_c_sbvr_8, "mat_c_sbvr_8")
+    print_tensor(mat_c_sbvr_6, "mat_c_sbvr_6")
+    print_tensor(mat_c_sbvr_4, "mat_c_sbvr_4")
+    print_tensor(mat_c_sbvr_2, "mat_c_sbvr_2")
 
-print(b_str("Case 1: Conversion to float32"))
-print_errors(mat_c_64, mat_c_32)
-print(b_str("Case 2: Conversion to float16"))
-print_errors(mat_c_64, mat_c_16)
-print(b_str("Case 3: Conversion to bfloat16")) 
-print_errors(mat_c_64, mat_c_bf16)
-print(b_str("Case 4: Conversion to float8_e4m3fn"))
-print_errors(mat_c_64, mat_c_e4m3fn)
-print(b_str("Case 5: Conversion to float8_e5m2"))
-print_errors(mat_c_64, mat_c_e5m2)
-print(b_str("Case 6: Conversion to sbvr 10 bit"))
-print_errors(mat_c_64, mat_c_sbvr_10)
-print(b_str("Case 7: Conversion to sbvr 8 bit"))
-print_errors(mat_c_64, mat_c_sbvr_8)
-print(b_str("Case 8: Conversion to sbvr 6 bit"))
-print_errors(mat_c_64, mat_c_sbvr_6)
-print(b_str("Case 9: Conversion to sbvr 4 bit"))
-print_errors(mat_c_64, mat_c_sbvr_4)
-print(b_str("Case 10: Conversion to sbvr 2 bit"))
-print_errors(mat_c_64, mat_c_sbvr_2)
+    print(b_str("Case 1: Conversion to float32"))
+    print_errors(mat_c_64, mat_c_32)
+    print(b_str("Case 2: Conversion to float16"))
+    print_errors(mat_c_64, mat_c_16)
+    print(b_str("Case 3: Conversion to bfloat16")) 
+    print_errors(mat_c_64, mat_c_bf16)
+    print(b_str("Case 4: Conversion to float8_e4m3fn"))
+    print_errors(mat_c_64, mat_c_e4m3fn)
+    print(b_str("Case 5: Conversion to float8_e5m2"))
+    print_errors(mat_c_64, mat_c_e5m2)
+    print(b_str("Case 6: Conversion to sbvr 10 bit"))
+    print_errors(mat_c_64, mat_c_sbvr_10)
+    print(b_str("Case 7: Conversion to sbvr 8 bit"))
+    print_errors(mat_c_64, mat_c_sbvr_8)
+    print(b_str("Case 8: Conversion to sbvr 6 bit"))
+    print_errors(mat_c_64, mat_c_sbvr_6)
+    print(b_str("Case 9: Conversion to sbvr 4 bit"))
+    print_errors(mat_c_64, mat_c_sbvr_4)
+    print(b_str("Case 10: Conversion to sbvr 2 bit"))
+    print_errors(mat_c_64, mat_c_sbvr_2)
+
+
+def test_with_llama3_weight():
+    MODEL_PATH = "meta-llama/Llama-3.2-3B-Instruct"
+    TARGET_LAYER_IDX = 1
+    model, _ = get_llama(MODEL_PATH)
+    ffn_weight = get_layer_ffn_weight(model, TARGET_LAYER_IDX)
+    logger.info(f"ffn_weight shape: {ffn_weight.shape}")
+    
+    restored_weight_sbvr_10 = sbvr(ffn_weight, num_sums=10).get_decoded_tensor()
+    restored_weight_sbvr_8 = sbvr(ffn_weight, num_sums=8).get_decoded_tensor()
+    restored_weight_sbvr_6 = sbvr(ffn_weight, num_sums=6).get_decoded_tensor()
+    restored_weight_sbvr_4 = sbvr(ffn_weight, num_sums=4).get_decoded_tensor()
+    restored_weight_sbvr_2 = sbvr(ffn_weight, num_sums=2).get_decoded_tensor()
+    
+    print(b_str("Case 1: Conversion to sbvr 10 bit"))
+    print_errors(ffn_weight, restored_weight_sbvr_10, log_ext=True, num_sums=10)
+    print(b_str("Case 2: Conversion to sbvr 8 bit"))
+    print_errors(ffn_weight, restored_weight_sbvr_8, log_ext=True, num_sums=8)
+    print(b_str("Case 3: Conversion to sbvr 6 bit"))
+    print_errors(ffn_weight, restored_weight_sbvr_6)
+    print(b_str("Case 4: Conversion to sbvr 4 bit"))
+    print_errors(ffn_weight, restored_weight_sbvr_4)
+    print(b_str("Case 5: Conversion to sbvr 2 bit"))
+    print_errors(ffn_weight, restored_weight_sbvr_2)
+    
+    
+if __name__ == "__main__":
+    # randn_test()
+    test_with_llama3_weight()
