@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import datetime
+import time
 
 from sbvr_utils.utils_llama import get_llama, get_layer_ffn_weight
 from sbvr_utils.log_config import get_logger, ExtLogger
@@ -23,7 +24,7 @@ def print_tensor(tensor, name="Tensor"):
           + g_str("shape: ") + str(tensor.shape))
     print(tensor)
     
-def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
+def get_errors(tensor1, tensor2):
     if tensor1.shape != tensor2.shape:
         raise ValueError("Tensors must have the same shape")
     
@@ -32,6 +33,14 @@ def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
     max_error = torch.max(errors).item()
     min_error = torch.min(errors).item()
     std_dev = torch.std(errors).item()
+    
+    return mse, max_error, min_error, std_dev
+        
+def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
+    if tensor1.shape != tensor2.shape:
+        raise ValueError("Tensors must have the same shape")
+    
+    mse, max_error, min_error, std_dev = get_errors(tensor1, tensor2)
     print(r_str("Errors: ") + 
           y_str("Mean: ") + f"{mse:.4e}" + ", " +
           y_str("Max: ") + f"{max_error:.4e}" + ", " +
@@ -62,20 +71,6 @@ def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
             if kwargs.get("num_sums", None) is not None:
                 log_file.write(f"Num Sums: {kwargs['num_sums']}\n")
             log_file.write(log_text)
-            
-
-def get_errors(tensor1, tensor2):
-    if tensor1.shape != tensor2.shape:
-        raise ValueError("Tensors must have the same shape")
-    
-    errors = tensor1 - tensor2
-    mse = torch.mean(errors ** 2).item()
-    max_error = torch.max(errors).item()
-    min_error = torch.min(errors).item()
-    std_dev = torch.std(errors).item()
-    
-    return mse, max_error, min_error, std_dev
-        
     
 def f64_matmul(mat_a, mat_b):
     if mat_a.shape[1] != mat_b.shape[0]:
@@ -86,9 +81,13 @@ class sbvr():
     def __init__(self, 
                  data: torch.Tensor = None, 
                  num_sums: int = 4,
-                 coeff_group_size: int = 256,
+                 coeff_group_size: int = 512,
+                 r_search_num = 64,
+                 s_search_num = 32,
+                 b_search_num = 32,
                  coeff_dtype: torch.dtype = None,
-                 bin_vec_dtype: torch.dtype = None):
+                 bin_vec_dtype: torch.dtype = None,
+                 compute_dtype: torch.dtype = None):
         if data is None:
             raise ValueError(r_str("Data cannot be None"))
             
@@ -97,11 +96,25 @@ class sbvr():
         self.coeff_dtype = data.dtype if coeff_dtype is None else coeff_dtype
         self.bin_vec_dtype = \
             torch.int32 if bin_vec_dtype is None else bin_vec_dtype
+        self.compute_dtype = \
+            torch.float16 if compute_dtype is None else compute_dtype
+        
+        self.r_search_num = r_search_num
+        self.s_search_num = s_search_num
+        self.b_search_num = b_search_num
         
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
+        
+        diff_mat_size = 3 * b_search_num * (2**self.num_sums) * \
+            coeff_group_size * torch.tensor(0, dtype=self.compute_dtype, 
+                                   device=data.device).element_size()
+        total_mem = torch.cuda.get_device_properties(data.device).total_memory
+        self.search_batch_size = int(total_mem * 0.90 / diff_mat_size)
+            
         self.__encode_to_sbvr(data)
         
+    @torch.no_grad()
     def __get_all_points(self, coeff_bias: torch.tensor, coeff: torch.tensor):
         num_coeff = coeff.shape[0]
         bin_combs = torch.tensor(
@@ -110,23 +123,22 @@ class sbvr():
         )
         return bin_combs @ coeff + coeff_bias
     
-    
-    def __encode_data_grouped(self, data):
+    @torch.no_grad()
+    def __get_search_space(self, data):
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
-        data_97 = torch.quantile(data, 0.97)
+        data_97 = torch.quantile(data.to(torch.float32), 0.97)
 
-        min_mse = 1e10
         r_max = math.pi*2/3 + 0.1
         r_min = 1.0
-        r_gran = (r_max - r_min) / 64
+        r_gran = (r_max - r_min) / self.r_search_num
         b_max = data_avg
         b_min = data_min - (abs(data_min)*0.1)
-        b_gran = (b_max - b_min) / 32
+        b_gran = (b_max - b_min) / self.b_search_num
         s_max = (data_max - data_min) * 1.1
-        s_min = (data_97 - data_avg) * 2
-        s_gran = (s_max - s_min) / 32
+        s_min = (data_97 - data_avg) * 2.0
+        s_gran = (s_max - s_min) / self.s_search_num
         
         print(r_str("\tnum_sums: ") + f"{self.num_sums}")
         print(r_str("\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
@@ -135,41 +147,75 @@ class sbvr():
         print(r_str("\tBias search range: ") + f"{data_min:.4e} to " + 
               f"{data_avg:.4e}, " +
               r_str("search granularity: ") + f"{b_gran:.4e}")
-        print(r_str("\tScale search range: ") + f"{data_97 - data_avg:.4e} to " +
-              f"{(data_max - data_avg):.4e}, " +
+        print(r_str("\tScale search range: ") + 
+              f"{((data_97 - data_avg*2.0)):.4e} to " +
+              f"{((data_max - data_min)*1.1):.4e}, " +
               r_str("search granularity: ") + f"{s_gran:.4e}")
         
-        r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran, device=data.device)
-        s_list = torch.arange(s_min, s_max + s_gran, s_gran, device=data.device)
-        b_list = torch.arange(b_min, b_max + b_gran, b_gran, device=data.device)
-        exponents = torch.arange(self.num_sums, device=data.device)
+        r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran, 
+                              device=data.device, dtype=data.dtype)
+        s_list = torch.arange(s_min + s_gran, s_max + s_gran, s_gran, 
+                              device=data.device, dtype=data.dtype)
+        b_list = torch.arange(b_min + b_gran, b_max + b_gran, b_gran, 
+                              device=data.device, dtype=data.dtype)
+        exponents = torch.arange(self.num_sums, device=data.device)   
 
-        # Construct the base search space
         search_space = r_list.unsqueeze(1) ** exponents.unsqueeze(0)
-        search_space = search_space / torch.sum(search_space, dim=1).unsqueeze(1)
-
-        # Multiply by s_list
+        search_space = \
+            search_space / torch.sum(search_space, dim=1).unsqueeze(1)
         search_space = s_list.view(-1, 1, 1) * search_space.unsqueeze(0)
         search_space = search_space.view(-1, self.num_sums)
-        
-        search_space = search_space.to(data.dtype)
-        
-        print(g_str("\tSearch space: ") + str(search_space))
-        print(g_str("\tSearch space shape: ") + str(search_space.shape))
 
-        len_search_space = search_space.shape[0]
-        search_range = 64
+        return search_space, r_list, b_list, s_list
+    
+    @torch.no_grad()
+    def __get_min_mse_coeff(self, biased_data, search_matrix):
+        bin_combs = torch.tensor(
+            list(itertools.product([0, 1], repeat=self.num_sums)),
+            dtype=biased_data.dtype, device=biased_data.device
+        ).T
+        candidiate_matrix = search_matrix @ bin_combs
         
-        print(g_str("\tDiff matrix size: ") + str(search_range * (2**self.num_sums) * data.shape[0] * b_list.shape[0] * data.element_size() / 1024 / 1024 / 1024) + " GB")
+        data_size = biased_data.shape[1]
+        bias_list_size = biased_data.shape[0]
+        n_ss_row = candidiate_matrix.shape[0]
+        n_ss_col = candidiate_matrix.shape[1]
+        
+        biased_data = biased_data.view(bias_list_size, 1, data_size, 1)
+        candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col)
+        
+        diff = (biased_data - candidiate_matrix)**2
+
+        # (bias_list_size, n_ss_row, data_size)
+        diff_selected, coeff_comb_indices = diff.min(dim=-1) 
+        mse = diff_selected.mean(dim=-1)
+        
+        flat_min_idx = mse.view(-1).argmin()
+        min_idx = torch.unravel_index(flat_min_idx, mse.shape)
+        bias_idx, coeff_set_idx = min_idx
+        coeff_comb_idx = coeff_comb_indices[bias_idx, coeff_set_idx]
+        min_mse = mse[bias_idx, coeff_set_idx].item()
+
+        return min_mse, bias_idx, coeff_set_idx, coeff_comb_idx
+    
+    @torch.no_grad()
+    def __encode_data(self, data):
+        
+        search_space, r_list, b_list, s_list = self.__get_search_space(data)
+        biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
+        len_search_space = search_space.shape[0]
+        min_mse = float("inf")
 
         # Loop over the bias values
-        for search_start in range(0, len_search_space, search_range):
-            search_end = min(search_start + search_range, len_search_space)
+        for search_start in range(0, len_search_space, self.search_batch_size):
+            torch.cuda.empty_cache()
+            search_end = \
+                min(search_start + self.search_batch_size, len_search_space)
             coeff_list = search_space[search_start:search_end]
 
             # Call a method to get the index and MSE among these coefficients
-            biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
-            mse, bias_idx, coeff_set_idx, coeff_comb_idx = self.__get_min_mse_coeff(biased_data, coeff_list)
+            mse, bias_idx, coeff_set_idx, coeff_comb_idx = \
+                self.__get_min_mse_coeff(biased_data, coeff_list)
             
             search_space_idx = search_start + coeff_set_idx
             scale_idx = search_space_idx // len(r_list)
@@ -190,38 +236,7 @@ class sbvr():
                 
         return best_bias, best_coeff, best_coeff_idx
     
-            
-    def __get_min_mse_coeff(self, biased_data, search_matrix):
-        bin_combs = torch.tensor(
-            list(itertools.product([0, 1], repeat=self.num_sums)),
-            dtype=biased_data.dtype, device=biased_data.device
-        ).T
-        
-        candidiate_matrix = search_matrix @ bin_combs
-        
-        data_size = biased_data.shape[1]
-        bias_list_size = biased_data.shape[0]
-        n_ss_row = candidiate_matrix.shape[0]
-        n_ss_col = candidiate_matrix.shape[1]
-        
-        biased_data = biased_data.view(bias_list_size, 1, data_size, 1)
-        candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col)
-        
-        diff = torch.abs(biased_data - candidiate_matrix)
-        diff_selected, coeff_comb_indices = diff.min(dim=-1) # (bias_list_size, n_ss_row, data_size)
-        diff_selected = diff_selected ** 2
-        mse = diff_selected.mean(dim=-1)
-        
-        flat_min_idx = mse.view(-1).argmin()
-        min_idx = torch.unravel_index(flat_min_idx, mse.shape)
-        bias_idx, coeff_set_idx = min_idx
-        coeff_comb_idx = coeff_comb_indices[bias_idx, coeff_set_idx]
-        min_mse = mse[bias_idx, coeff_set_idx]
-        min_mse = min_mse.item()
-        
-        return min_mse, bias_idx, coeff_set_idx, coeff_comb_idx
-        
-        
+    @torch.no_grad()
     def __encode_to_sbvr(self, data):
         print(b_str("Encoding to SBVR..."))
         data_num = data.numel()
@@ -240,8 +255,9 @@ class sbvr():
             group_start = i * self.coeff_group_size
             group_end = \
                 min(group_start + self.coeff_group_size, data_num)
-            group_data = data.flatten()[group_start:group_end].to(torch.float64)
-            coeff_bias, coeff, coeff_idx = self.__encode_data_grouped(group_data)
+            group_data = \
+                data.flatten()[group_start:group_end].to(self.compute_dtype)
+            coeff_bias, coeff, coeff_idx = self.__encode_data(group_data)
             self.coeff_bias[i] = coeff_bias.item()
             self.coeff[i] = coeff
             self.coeff_idx[group_start:group_end] = coeff_idx
@@ -283,12 +299,12 @@ def randn_test():
         torch.cuda.manual_seed_all(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (16, 16)
+    mat_size = (64, 64)
 
     mat_a = torch.randn(mat_size, dtype=torch.float64).to(device)
     mat_b = torch.randn(mat_size, dtype=torch.float64).to(device)
-    print_tensor(mat_a, "mat_a")
-    print_tensor(mat_b, "mat_b")
+    # print_tensor(mat_a, "mat_a")
+    # print_tensor(mat_b, "mat_b")
 
     mat_c_64 = f64_matmul(mat_a, mat_b)
     mat_c_32 = f64_matmul(mat_a.to(torch.float32), mat_b.to(torch.float32))
@@ -296,8 +312,6 @@ def randn_test():
     mat_c_bf16 = f64_matmul(mat_a.to(torch.bfloat16), mat_b.to(torch.bfloat16))
     mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), mat_b.to(torch.float8_e4m3fn))
     mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), mat_b.to(torch.float8_e5m2))
-    mat_c_sbvr_10 = f64_matmul(sbvr(mat_a, num_sums=10).get_decoded_tensor(), 
-                            sbvr(mat_b, num_sums=10).get_decoded_tensor())
     mat_c_sbvr_8 = f64_matmul(sbvr(mat_a, num_sums=8).get_decoded_tensor(), 
                             sbvr(mat_b, num_sums=8).get_decoded_tensor())
     mat_c_sbvr_6 = f64_matmul(sbvr(mat_a, num_sums=6).get_decoded_tensor(), 
@@ -307,16 +321,15 @@ def randn_test():
     mat_c_sbvr_2 = f64_matmul(sbvr(mat_a, num_sums=2).get_decoded_tensor(), 
                             sbvr(mat_b, num_sums=2).get_decoded_tensor())
 
-    print_tensor(mat_c_64, "mat_c")
-    print_tensor(mat_c_16, "mat_c_16")
-    print_tensor(mat_c_bf16, "mat_c_bf16")
-    print_tensor(mat_c_e4m3fn, "mat_c_e4m3fn")
-    print_tensor(mat_c_e5m2, "mat_c_e5m2")
-    print_tensor(mat_c_sbvr_10, "mat_c_sbvr_10")
-    print_tensor(mat_c_sbvr_8, "mat_c_sbvr_8")
-    print_tensor(mat_c_sbvr_6, "mat_c_sbvr_6")
-    print_tensor(mat_c_sbvr_4, "mat_c_sbvr_4")
-    print_tensor(mat_c_sbvr_2, "mat_c_sbvr_2")
+    # print_tensor(mat_c_64, "mat_c")
+    # print_tensor(mat_c_16, "mat_c_16")
+    # print_tensor(mat_c_bf16, "mat_c_bf16")
+    # print_tensor(mat_c_e4m3fn, "mat_c_e4m3fn")
+    # print_tensor(mat_c_e5m2, "mat_c_e5m2")
+    # print_tensor(mat_c_sbvr_8, "mat_c_sbvr_8")
+    # print_tensor(mat_c_sbvr_6, "mat_c_sbvr_6")
+    # print_tensor(mat_c_sbvr_4, "mat_c_sbvr_4")
+    # print_tensor(mat_c_sbvr_2, "mat_c_sbvr_2")
 
     print(b_str("Case 1: Conversion to float32"))
     print_errors(mat_c_64, mat_c_32)
@@ -328,15 +341,13 @@ def randn_test():
     print_errors(mat_c_64, mat_c_e4m3fn)
     print(b_str("Case 5: Conversion to float8_e5m2"))
     print_errors(mat_c_64, mat_c_e5m2)
-    print(b_str("Case 6: Conversion to sbvr 10 bit"))
-    print_errors(mat_c_64, mat_c_sbvr_10)
-    print(b_str("Case 7: Conversion to sbvr 8 bit"))
+    print(b_str("Case 6: Conversion to sbvr 8 bit"))
     print_errors(mat_c_64, mat_c_sbvr_8)
-    print(b_str("Case 8: Conversion to sbvr 6 bit"))
+    print(b_str("Case 7: Conversion to sbvr 6 bit"))
     print_errors(mat_c_64, mat_c_sbvr_6)
-    print(b_str("Case 9: Conversion to sbvr 4 bit"))
+    print(b_str("Case 8: Conversion to sbvr 4 bit"))
     print_errors(mat_c_64, mat_c_sbvr_4)
-    print(b_str("Case 10: Conversion to sbvr 2 bit"))
+    print(b_str("Case 9: Conversion to sbvr 2 bit"))
     print_errors(mat_c_64, mat_c_sbvr_2)
 
 
@@ -395,5 +406,5 @@ def test_with_llama3_weight():
     logger.info("Test completed. Check the log file for details.")
     
 if __name__ == "__main__":
-    # randn_test()
-    test_with_llama3_weight()
+    randn_test()
+    # test_with_llama3_weight()
