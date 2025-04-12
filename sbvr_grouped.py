@@ -86,18 +86,16 @@ class sbvr():
                  s_search_num = 32,
                  b_search_num = 32,
                  coeff_dtype: torch.dtype = None,
-                 bin_vec_dtype: torch.dtype = None,
-                 compute_dtype: torch.dtype = None):
+                 bin_vec_dtype: torch.dtype = torch.int32,
+                 compute_dtype: torch.dtype = torch.float16):
         if data is None:
             raise ValueError(r_str("Data cannot be None"))
             
         self.num_sums = num_sums
         self.coeff_group_size = coeff_group_size
         self.coeff_dtype = data.dtype if coeff_dtype is None else coeff_dtype
-        self.bin_vec_dtype = \
-            torch.int32 if bin_vec_dtype is None else bin_vec_dtype
-        self.compute_dtype = \
-            torch.float16 if compute_dtype is None else compute_dtype
+        self.bin_vec_dtype = bin_vec_dtype
+        self.compute_dtype = compute_dtype
         
         self.r_search_num = r_search_num
         self.s_search_num = s_search_num
