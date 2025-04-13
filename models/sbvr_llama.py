@@ -21,6 +21,7 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
+import itertools
 from torch import nn
 
 from transformers.activations import ACT2FN
@@ -55,6 +56,54 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
 _CONFIG_FOR_DOC = "LlamaConfig"
+
+###############################################################################
+# Custom forward pass for SBVRLlama
+
+# Since decode kernel is not supported yet, 
+# we just use the restored weight for gemm
+###############################################################################
+class SBVRLinear(nn.Module):
+    def __init__(self, in_features, out_features, bias=False, coeff_group_size:int=512, num_sums:int=4):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bias = bias
+        
+        self.num_sums = num_sums
+        self.coeff = None
+        self.coeff_bias = None
+        self.coeff_idx = None
+        self.coeff_group_size = coeff_group_size
+        self.bin_combs = torch.tensor(
+            list(itertools.product([0, 1], repeat=num_sums)),
+            dtype=self.coeff_dtype, device=self.coeff.device
+        )
+        self.restored_weight = None
+        self.restore_weight()
+        
+              
+    def foward(self, x):
+        return x @ self.restored_weight.T
+    
+    
+    def restore_weight(self):
+        decoded_tensor = torch.empty((self.out_features, self.in_features),
+                                      dtype=self.coeff.dtype,
+                                      device=self.coeff.device)
+        num_coeff_groups = self.coeff_bias.shape[0]
+        for i in range(num_coeff_groups):
+            group_start = i * self.coeff_group_size
+            group_end = \
+                min(group_start + self.coeff_group_size, decoded_tensor.numel())
+            group_coeff_bias = self.coeff_bias[i]
+            group_coeff = self.coeff[i]
+            group_coeff_idx = self.coeff_idx[group_start:group_end]
+            group_all_points = self.bin_combs @ group_coeff + group_coeff_bias
+            group_data = group_all_points[group_coeff_idx]
+            decoded_tensor.flatten()[group_start:group_end] = group_data
+        
+        self.restored_weight = decoded_tensor
 
 
 class LlamaRMSNorm(nn.Module):

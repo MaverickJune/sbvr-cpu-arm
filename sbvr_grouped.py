@@ -121,17 +121,22 @@ class sbvr():
         self.search_cache = {"coeff": [], "bias": [], "mse": []}
         self.cache_hits = 0
         self.runs = 0
+        
+        self.bin_combs = torch.tensor(
+            list(itertools.product([0, 1], repeat=num_sums)),
+            dtype=self.coeff_dtype, device=data.device
+        )
             
         self.__encode_to_sbvr(data)
         
     @torch.inference_mode()
     def __get_all_points(self, coeff_bias: torch.tensor, coeff: torch.tensor):
         num_coeff = coeff.shape[0]
-        bin_combs = torch.tensor(
-            list(itertools.product([0, 1], repeat=num_coeff)),
-            dtype=coeff.dtype, device=coeff.device
-        )
-        return bin_combs @ coeff + coeff_bias
+        # bin_combs = torch.tensor(
+        #     list(itertools.product([0, 1], repeat=num_coeff)),
+        #     dtype=coeff.dtype, device=coeff.device
+        # )
+        return self.bin_combs @ coeff + coeff_bias
     
     @torch.inference_mode()
     def __get_search_space_from_lists(self, r_list, b_list, s_list):
