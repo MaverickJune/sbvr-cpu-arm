@@ -83,13 +83,13 @@ class sbvr():
                  data: torch.Tensor = None, 
                  num_sums: int = 4,
                  coeff_group_size: int = 512,
-                 r_search_num = 64,
-                 s_search_num = 32,
-                 b_search_num = 32,
-                 min_search_cache_num = 4,
+                 r_search_num = 80,
+                 s_search_num = 48,
+                 b_search_num = 48,
+                 min_search_cache_num = 8,
                  max_coeff_search_cache_num = 96,
-                 max_bias_search_cache_num = 64,
-                 cache_mse_cutoff: float = 0.6,
+                 max_bias_search_cache_num = 80,
+                 cache_mse_cutoff: float = 0.5,
                  coeff_dtype: torch.dtype = None,
                  bin_vec_dtype: torch.dtype = torch.int32,
                  compute_dtype: torch.dtype = torch.float16):
@@ -292,7 +292,7 @@ class sbvr():
         if len(self.search_cache["coeff"]) < self.max_coeff_search_cache_num:
             cur_coeff = best_coeff.tolist()
             for coeff in self.search_cache["coeff"]:
-                if all(abs(cur_coeff[i] - coeff[i]) < abs(cur_coeff[i] * 0.015) 
+                if all(abs(cur_coeff[i] - coeff[i]) < abs(cur_coeff[i] * 0.005) 
                        for i in range(min(3, len(cur_coeff)))):
                     break
             else:
@@ -300,7 +300,7 @@ class sbvr():
         if len(self.search_cache["bias"]) < self.max_bias_search_cache_num:
             cur_bias = best_bias.item()
             for bias in self.search_cache["bias"]:
-                if abs(cur_bias - bias) < abs(cur_bias * 0.02):
+                if abs(cur_bias - bias) < abs(cur_bias * 0.01):
                     break
             else:
                 self.search_cache["bias"].append(best_bias.item())
@@ -376,7 +376,7 @@ def randn_test():
         torch.cuda.manual_seed_all(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (256, 256)
+    mat_size = (4096, 4096)
 
     mat_a = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
     mat_b = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
