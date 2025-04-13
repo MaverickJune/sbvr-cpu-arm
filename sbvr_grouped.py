@@ -161,7 +161,7 @@ class sbvr():
         s_min = (data_97 - data_avg) * 2.0
         s_gran = (s_max - s_min) / self.s_search_num
         
-        print(b_str("\tnum_sums: ") + f"{self.num_sums}")
+        print(b_str("\nNum_sums: ") + f"{self.num_sums}")
         print(y_str("\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
               f"{r_max:.4e}, " +
               y_str("search granularity: ") + f"{r_gran:.4e}")
@@ -326,7 +326,7 @@ class sbvr():
         self.coeff_idx = torch.empty((data_num), dtype=int, 
                                      device=self.coeff.device)
         
-        for i in tqdm(range(num_coeff_groups), ncols=40, 
+        for i in tqdm(range(num_coeff_groups), ncols=80, 
                       desc="Encoding groups", unit="group"):
             # logger.info(f"Encoding group {i + 1}/{num_coeff_groups}")
             group_start = i * self.coeff_group_size
@@ -376,7 +376,7 @@ def randn_test():
         torch.cuda.manual_seed_all(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (256, 256)
+    mat_size = (4096, 4096)
 
     mat_a = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
     mat_b = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
