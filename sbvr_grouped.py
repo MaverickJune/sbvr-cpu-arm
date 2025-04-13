@@ -252,7 +252,7 @@ class sbvr():
             cutoff_mse = sum(mse_window) / len(mse_window)
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
-                print (g_str("Cache Hit ") +
+                print (b_str("\nCache Hit ") +
                     f"({self.cache_hits / (self.runs):.2f}) - " +
                     y_str("Best MSE: ") + f"{min_mse:.4e}" +
                     ", " + y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
