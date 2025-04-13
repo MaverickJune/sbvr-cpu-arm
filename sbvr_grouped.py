@@ -89,7 +89,7 @@ class sbvr():
                  min_search_cache_num = 8,
                  max_coeff_search_cache_num = 96,
                  max_bias_search_cache_num = 80,
-                 cache_mse_cutoff: float = 0.5,
+                 max_mse_window_size: int = 10,
                  coeff_dtype: torch.dtype = None,
                  bin_vec_dtype: torch.dtype = torch.int32,
                  compute_dtype: torch.dtype = torch.float16):
@@ -117,7 +117,7 @@ class sbvr():
         self.min_search_cache_num = min_search_cache_num
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
-        self.cache_mse_cutoff = cache_mse_cutoff
+        self.max_mse_window_size = max_mse_window_size
         self.search_cache = {"coeff": [], "bias": [], "mse": []}
         self.cache_hits = 0
         self.runs = 0
@@ -246,21 +246,20 @@ class sbvr():
                     best_coeff_idx = coeff_comb_idx
                     best_r = -1.0
                     best_s = -1.0
-            cutoff_mse = \
-                torch.quantile(torch.tensor(self.search_cache["mse"]),
-                               self.cache_mse_cutoff)
+            window_size = \
+                min(len(self.search_cache["mse"]), self.max_mse_window_size)
+            mse_window = self.search_cache["mse"][-window_size:]
+            cutoff_mse = sum(mse_window) / len(mse_window)
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
-                print (g_str("Using cached search space ") +
-                    f"({self.cache_hits / (self.runs):.2f}): " +
+                print (g_str("Cache Hit ") +
+                    f"({self.cache_hits / (self.runs):.2f}) - " +
                     y_str("Best MSE: ") + f"{min_mse:.4e}" +
                     ", " + y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
                     ", " + y_str("Coeff: ") + str(best_coeff) +
                     ", " + y_str("Bias: ") + f"{best_bias.item():.4e}")
                 return best_bias, best_coeff, best_coeff_idx
 
-                
-                
         search_space, r_list, b_list, s_list = self.__get_search_space(data)
         biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
         len_search_space = search_space.shape[0]
@@ -327,7 +326,8 @@ class sbvr():
         self.coeff_idx = torch.empty((data_num), dtype=int, 
                                      device=self.coeff.device)
         
-        for i in tqdm(range(num_coeff_groups)):
+        for i in tqdm(range(num_coeff_groups), ncols=40, 
+                      desc="Encoding groups", unit="group"):
             # logger.info(f"Encoding group {i + 1}/{num_coeff_groups}")
             group_start = i * self.coeff_group_size
             group_end = \
@@ -376,7 +376,7 @@ def randn_test():
         torch.cuda.manual_seed_all(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (4096, 4096)
+    mat_size = (256, 256)
 
     mat_a = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
     mat_b = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
