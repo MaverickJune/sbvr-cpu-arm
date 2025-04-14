@@ -7,10 +7,6 @@ import datetime
 import time
 from tqdm import tqdm
 
-from sbvr_utils.utils_llama import get_llama, get_layer_ffn_weight
-from sbvr_utils.log_config import get_logger, ExtLogger
-logger = get_logger(__name__)
-
 def r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
 def g_str(s):
@@ -37,7 +33,7 @@ def get_errors(tensor1, tensor2):
     
     return mse, max_error, min_error, std_dev
         
-def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
+def print_errors(tensor1, tensor2):
     if tensor1.shape != tensor2.shape:
         raise ValueError("Tensors must have the same shape")
     
@@ -47,31 +43,6 @@ def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
           y_str("Max: ") + f"{max_error:.4e}" + ", " +
           y_str("Min: ") + f"{min_error:.4e}" + ", " +
           y_str("Std. Dev.: ") + f"{std_dev:.4e}")
-    
-    if log_ext:
-        curr_dir = os.path.dirname(os.path.abspath(__file__))
-        curr_datetime = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = os.path.join(curr_dir, "logs", f"error.txt")
-        parent_dir = os.path.dirname(log_path)
-        os.makedirs(parent_dir, exist_ok=True)
-        
-        if not os.path.exists(log_path):
-            with open(log_path, "w") as f:
-                pass
-            
-        log_text = (
-            "Errors: "
-            + "Mean: " + f"{mse:.4e}" + ", "
-            + "Max: " + f"{max_error:.4e}" + ", "
-            + "Min: " + f"{min_error:.4e}" + ", "
-            + "Std. Dev.: " + f"{std_dev:.4e}" + "\n\n"
-        )
-        
-        with open(log_path, "a") as log_file:
-            log_file.write(f"Timestamp: {curr_datetime}\n")
-            if kwargs.get("num_sums", None) is not None:
-                log_file.write(f"Num Sums: {kwargs['num_sums']}\n")
-            log_file.write(log_text)
     
 def f64_matmul(mat_a, mat_b):
     if mat_a.shape[1] != mat_b.shape[0]:
@@ -92,7 +63,7 @@ class sbvr():
                  max_mse_window_size: int = 20,
                  search_extend_ratio: float = 1.6,
                  coeff_dtype: torch.dtype = None,
-                 bin_vec_dtype: torch.dtype = torch.int32,
+                 bvr_dtype: torch.dtype = torch.int32,
                  compute_dtype: torch.dtype = torch.float16):
         if data is None:
             raise ValueError(r_str("Data cannot be None"))
@@ -100,7 +71,7 @@ class sbvr():
         self.num_sums = num_sums
         self.coeff_group_size = coeff_group_size
         self.coeff_dtype = data.dtype if coeff_dtype is None else coeff_dtype
-        self.bin_vec_dtype = bin_vec_dtype
+        self.bvr_dtype = bvr_dtype
         self.compute_dtype = compute_dtype
         
         self.r_search_num = r_search_num
@@ -130,8 +101,11 @@ class sbvr():
             list(itertools.product([0, 1], repeat=num_sums)),
             dtype=self.coeff_dtype, device=data.device
         )
+        
+        self.bvr = None
             
-        self.__encode_to_sbvr(data)
+        coeff_idx = self.__encode_to_sbvr(data)
+        self.__change_coeff_idx_to_bvr(coeff_idx)
         
     @torch.inference_mode()
     def __get_all_points(self, coeff_bias: torch.tensor, coeff: torch.tensor):
@@ -211,7 +185,7 @@ class sbvr():
         n_ss_col = candidiate_matrix.shape[1]
         
         biased_data = biased_data.view(bias_list_size, 1, data_size, 1)
-        candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col) # (group_size, 2**num_sums)
+        candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col) 
         
         diff = (biased_data - candidiate_matrix)**2
 
@@ -287,12 +261,8 @@ class sbvr():
         else:
             print(r_str("\n\tWarming up cache... "))
 
-        use_extended = False
-        if self.cache_hits / self.runs > 0.5:
-            use_extended = True
-        
         search_space, r_list, b_list, s_list = \
-            self.__get_search_space(data, extended=use_extended)
+            self.__get_search_space(data, (self.cache_hits / self.runs) > 0.5)
         biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
         len_search_space = search_space.shape[0]
 
@@ -355,7 +325,7 @@ class sbvr():
         self.coeff_bias = torch.empty((num_coeff_groups), 
                                       dtype=self.coeff_dtype, 
                                       device=self.coeff.device)
-        self.coeff_idx = torch.empty((data_num), dtype=int, 
+        global_coeff_idx = torch.empty((data_num), dtype=int, 
                                      device=self.coeff.device)
         
         for i in tqdm(range(num_coeff_groups), ncols=80, 
@@ -369,20 +339,64 @@ class sbvr():
             coeff_bias, coeff, coeff_idx = self.__encode_data(group_data)
             self.coeff_bias[i] = coeff_bias.item()
             self.coeff[i] = coeff
-            self.coeff_idx[group_start:group_end] = coeff_idx
-        
+            global_coeff_idx[group_start:group_end] = coeff_idx
+            
+        return global_coeff_idx
+            
+    @torch.inference_mode()
+    def __dec2bin(self, x, bits):
+        # mask = 2 ** torch.arange(bits).to(x.device, x.dtype)
+        mask = 2 ** torch.arange(bits - 1, -1, -1).to(x.device, x.dtype)
+        return x.unsqueeze(-1).bitwise_and(mask).ne(0).float()
+
+    @torch.inference_mode()
+    def __bin2dec(self, b, bits):
+        mask = 2 ** torch.arange(bits - 1, -1, -1).to(b.device, b.dtype)
+        return torch.sum(mask * b, -1)
+            
+    @torch.inference_mode()
+    def __change_coeff_idx_to_bvr(self, coeff_idx):
+        self.coeff_idx_len = coeff_idx.shape[0]
+        bin_vec = self.__dec2bin(coeff_idx, self.num_sums).to(self.bvr_dtype)
+        num_bits = bin_vec.element_size() * 8
+        bin_vec = bin_vec.to(torch.int64).transpose(0, 1)
+        padded_len = (bin_vec.shape[1] + num_bits - 1) // num_bits * num_bits
+        bin_vec_padded = torch.zeros((self.num_sums, padded_len),
+                          dtype=torch.int64, device=self.coeff.device)
+        bin_vec_padded[:, :bin_vec.shape[1]] = bin_vec
+        bin_vec_padded = bin_vec_padded.view(-1, num_bits)
+        powers = 2 ** torch.arange(num_bits, 
+                                   dtype=torch.int64, device=self.coeff.device)
+        bvr = torch.sum(bin_vec_padded * powers.unsqueeze(0), dim=1)
+        self.bvr = bvr.view(self.num_sums, -1).to(self.bvr_dtype)
+     
+    @torch.inference_mode()
+    def __change_bvr_to_coeff_idx(self):
+        num_bits = self.bvr.element_size() * 8
+        powers = 2 ** torch.arange(num_bits, 
+                                   dtype=torch.int32, device=self.coeff.device)
+        bin_vec_padded = ((self.bvr.unsqueeze(-1) & powers) != 0)
+        bin_vec_padded = bin_vec_padded.view(self.num_sums, -1).to(torch.int32)
+        bin_vec = bin_vec_padded[:, :self.coeff_idx_len]
+        bin_vec = bin_vec.transpose(0, 1)
+        coeff_idx = self.__bin2dec(bin_vec, self.num_sums)
+        coeff_idx = coeff_idx.view(-1)
+        return coeff_idx
+            
+    @torch.inference_mode()
     def get_decoded_tensor(self):
         decoded_tensor = torch.empty(self.original_data_shape,
                                       dtype=self.original_dtype,
                                       device=self.coeff.device)
         num_coeff_groups = self.coeff_bias.shape[0]
+        coeff_idx = self.__change_bvr_to_coeff_idx()
         for i in range(num_coeff_groups):
             group_start = i * self.coeff_group_size
             group_end = \
                 min(group_start + self.coeff_group_size, decoded_tensor.numel())
             group_coeff_bias = self.coeff_bias[i]
             group_coeff = self.coeff[i]
-            group_coeff_idx = self.coeff_idx[group_start:group_end]
+            group_coeff_idx = coeff_idx[group_start:group_end]
             group_all_points = \
                 self.__get_all_points(group_coeff_bias, group_coeff)
             group_data = group_all_points[group_coeff_idx]
@@ -397,7 +411,7 @@ class sbvr():
         y_str("\n\tNumber of Summations: ") + str(self.num_sums) + \
         y_str("\n\tCoefficient Group Size: ") + str(self.coeff_group_size) + \
         y_str("\n\tCoefficient Data Type: ") + str(self.coeff_dtype) + \
-        y_str("\n\tBinary Vector Data Type: ") + str(self.bin_vec_dtype) + \
+        y_str("\n\tBinary Vector Data Type: ") + str(self.bvr_dtype) + \
         y_str("\n\tCoefficient Tensor Size: ") + str(self.coeff.shape)
         return info_str
 
@@ -419,8 +433,10 @@ def randn_test(mat_len=512, sbvr_max_sums=6):
     mat_c_32 = f64_matmul(mat_a.to(torch.float32), mat_b.to(torch.float32))
     mat_c_16 = f64_matmul(mat_a.to(torch.float16), mat_b.to(torch.float16))
     mat_c_bf16 = f64_matmul(mat_a.to(torch.bfloat16), mat_b.to(torch.bfloat16))
-    mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), mat_b.to(torch.float8_e4m3fn))
-    mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), mat_b.to(torch.float8_e5m2))
+    mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), 
+                              mat_b.to(torch.float8_e4m3fn))
+    mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), 
+                            mat_b.to(torch.float8_e5m2))
     time_dict = {}
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -1):
