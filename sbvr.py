@@ -93,6 +93,7 @@ class sbvr():
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
         self.max_mse_window_size = max_mse_window_size
+        self.min_mse = 2**-14
         self.search_cache = {"coeff": [], "bias": [], "mse": []}
         self.cache_hits = 0
         self.runs = 0
@@ -153,7 +154,10 @@ class sbvr():
             s_min = (data_92 - data_avg) * 2.0
             s_gran = (s_max - s_min) / (self.s_search_num * extend_ratio)
             
-        print(b_str("\tNum_sums: ") + f"{self.num_sums}")
+        print(b_str("\tNum_sums: ") + f"{self.num_sums}",
+                ", " + y_str("Data range: ") + f"{data_min:.4e} to {data_max:.4e}" +
+                ", " + y_str("avg: ") + f"{data_avg:.4e}" +
+                ", " + y_str("97%: ") + f"{data_97:.4e}")
         print(y_str("\t\tR search range: ") + f"{r_min:.4e} to {r_max:.4e}, " +
               y_str("search granularity: ") + f"{r_gran:.4e}")
         print(y_str("\t\tBias search range: ") + 
@@ -236,10 +240,13 @@ class sbvr():
                     best_coeff_idx = coeff_comb_idx
                     best_r = -1.0
                     best_s = -1.0
+                    if mse < self.min_mse:
+                        break
+                    
             window_size = \
                 min(len(self.search_cache["mse"]), self.max_mse_window_size)
             mse_window = self.search_cache["mse"][-window_size:]
-            cutoff_mse = (sum(mse_window) / len(mse_window)) + 2e-10
+            cutoff_mse = (sum(mse_window) / len(mse_window)) + self.min_mse
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
                 coeff_str = ['%.4f' % elem for elem in best_coeff.tolist()]
@@ -288,6 +295,8 @@ class sbvr():
                 best_coeff_idx = coeff_comb_idx
                 best_r = r_list[r_idx]
                 best_s = s_list[scale_idx]
+                if mse < self.min_mse:
+                    break
                 
         # Cache the results
         if len(self.search_cache["coeff"]) < self.max_coeff_search_cache_num:
