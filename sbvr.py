@@ -93,7 +93,7 @@ class sbvr():
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
         self.max_mse_window_size = max_mse_window_size
-        self.acceptable_mse = 10**-8
+        self.acceptable_mse = 10**-9
         self.search_cache = {"coeff": [], "bias": [], "mse": []}
         self.cache_hits = 0
         self.runs = 0
@@ -246,8 +246,9 @@ class sbvr():
             window_size = \
                 min(len(self.search_cache["mse"]), self.max_mse_window_size)
             mse_window = self.search_cache["mse"][-window_size:]
-            cutoff_mse = \
-                (sum(mse_window) / len(mse_window)) + self.acceptable_mse
+            cutoff_mse = (sum(mse_window) / len(mse_window))
+            if cutoff_mse < self.acceptable_mse:
+                cutoff_mse = self.acceptable_mse
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
                 coeff_str = ['%.4f' % elem for elem in best_coeff.tolist()]
