@@ -4,7 +4,7 @@ from sbvr_utils.utils_llama import get_llama
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
-from sbvr_grouped import sbvr 
+from sbvr import sbvr 
 import os
 
 from sbvr_utils.log_config import get_logger

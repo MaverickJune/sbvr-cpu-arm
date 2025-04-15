@@ -1,30 +1,47 @@
-from transformers import LlamaForCausalLM, AutoTokenizer
+from transformers import LlamaForCausalLM, AutoTokenizer, BitsAndBytesConfig, FineGrainedFP8Config
 from models.sbvr_llama import SBVRLlamaForCausalLM
 import torch
-import torch.nn as nn
-import torch.multiprocessing as mp
 
 from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
 
 @torch.no_grad()
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
-              device_map:str ="auto", use_sbvr:bool = False):
+              device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False):
     r'''
     Fetch llama model from huggingfaces
 
     @param model_path: target model to fetch from huggingface
     @param tokenizer_path: In case you want to use different tokenizer
     '''
-
     if not tokenizer_path:
         tokenizer_path = model_path
+        
     if use_sbvr:
         logger.info("Using SBVR Llama model")
         model = SBVRLlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
             device_map=device_map
+        )
+    elif use_llm_int8:
+        logger.info("Using Llama model with LLM.int8")
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True
+        )
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            device_map=device_map,
+            quantization_config=quantization_config
+        )
+    elif use_fp8:
+        logger.info("Using Llama model with FP8")
+        fp8_config = FineGrainedFP8Config()
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype="auto",
+            device_map=device_map,
+            quantization_config=fp8_config
         )
     else:
         model = LlamaForCausalLM.from_pretrained(

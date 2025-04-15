@@ -33,8 +33,8 @@ def eval_ppl(model=None, tokenizer=None, dataset="wikitext-2", seqlen=256, n_sam
     model.eval()
     
     if dataset == "wikitext-2":
-        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test[:20%]")
-        testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt").input_ids
+        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt", truncation=False,).input_ids
         logger.info(f"Size of test data: {testenc.numel() * testenc.element_size() / 1024 / 1024 / 1024:.3f} GB")
         
         max_samples = testenc.numel() // seqlen
@@ -44,7 +44,24 @@ def eval_ppl(model=None, tokenizer=None, dataset="wikitext-2", seqlen=256, n_sam
         else:
             n_samples = max_samples
         logger.info(f"Number of samples: {n_samples}")
-        
     else:
         raise NotImplementedError(f"Dataset {dataset} is not implemented for now")
+        
+    loss_fct = torch.nn.CrossEntropyLoss().cuda()
+    acc_loss = 0.0
+    progress = tqdm(range(n_samples), desc="Evaluating", unit="sample", ncols=80)
+    for i in progress:
+        input = testenc[i, :].cuda().view(1, -1)
+        output = model(input, use_cache=False, output_hidden_states=False, output_attentions=False)[0]
+        shift_logits = output[:, :-1, :].contiguous()
+        shift_labels = input[:, 1:]
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        acc_loss += loss.item()
+        progress.set_description(f"avg_loss = {acc_loss/(i+1):.4f}")
+    acc_loss = acc_loss / n_samples
+    
+    ppl = torch.exp(torch.tensor(acc_loss)).item()
+    logger.info(f"Perplexity: {ppl:.4f}")
+            
+        
     
