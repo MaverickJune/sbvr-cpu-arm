@@ -93,7 +93,7 @@ class sbvr():
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
         self.max_mse_window_size = max_mse_window_size
-        self.min_mse = 2**-14
+        self.acceptable_mse = 10**-8
         self.search_cache = {"coeff": [], "bias": [], "mse": []}
         self.cache_hits = 0
         self.runs = 0
@@ -195,7 +195,7 @@ class sbvr():
 
         # (bias_list_size, n_ss_row, data_size)
         diff_selected, coeff_comb_indices = diff.min(dim=-1) 
-        mse = diff_selected.mean(dim=-1)
+        mse = diff_selected.to(torch.float32).mean(dim=-1)
         
         flat_min_idx = mse.view(-1).argmin()
         min_idx = torch.unravel_index(flat_min_idx, mse.shape)
@@ -240,13 +240,14 @@ class sbvr():
                     best_coeff_idx = coeff_comb_idx
                     best_r = -1.0
                     best_s = -1.0
-                    if mse < self.min_mse:
+                    if mse < self.acceptable_mse:
                         break
                     
             window_size = \
                 min(len(self.search_cache["mse"]), self.max_mse_window_size)
             mse_window = self.search_cache["mse"][-window_size:]
-            cutoff_mse = (sum(mse_window) / len(mse_window)) + self.min_mse
+            cutoff_mse = \
+                (sum(mse_window) / len(mse_window)) + self.acceptable_mse
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
                 coeff_str = ['%.4f' % elem for elem in best_coeff.tolist()]
@@ -295,7 +296,7 @@ class sbvr():
                 best_coeff_idx = coeff_comb_idx
                 best_r = r_list[r_idx]
                 best_s = s_list[scale_idx]
-                if mse < self.min_mse:
+                if mse < self.acceptable_mse:
                     break
                 
         # Cache the results
