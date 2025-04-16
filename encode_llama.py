@@ -36,7 +36,8 @@ def process_single_decoder_layer(layer_idx, target_layer, curr_device, num_sums=
         save_dict = {
             "coeff": sbvr_compressed_weight.coeff,
             "coeff_bias": sbvr_compressed_weight.coeff_bias,
-            "coeff_idx": sbvr_compressed_weight.bvr,
+            "bvr": sbvr_compressed_weight.bvr, # coeff_idx -> bvr
+            "bvr_dtype": sbvr_compressed_weight.bvr_dtype, # added
         }
         torch.save(save_dict, weight_path)
         logger.info(f"Saved {weight_name} weight to {weight_path}")
@@ -51,7 +52,8 @@ def process_lm_head(lm_head, num_sums=4, curr_device=0, save_path=None):
     save_dict = {
         "coeff": sbvr_compressed_weight.coeff,
         "coeff_bias": sbvr_compressed_weight.coeff_bias,
-        "coeff_idx": sbvr_compressed_weight.coeff_idx,
+        "bvr": sbvr_compressed_weight.bvr,
+        "bvr_dtype": sbvr_compressed_weight.bvr_dtype,
     }
     torch.save(save_dict, weight_path)
     logger.info(f"Saved lm_head weight to {weight_path}")
