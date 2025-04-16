@@ -5,3 +5,10 @@ compressed_weights/
 sbvr_weight.zip
 result.txt
 dummy/
+build/
+dist/
+*.egg-info/
+*.txt
+*.pt
+*.pyc
+*.so

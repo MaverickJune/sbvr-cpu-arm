@@ -5,7 +5,9 @@ import os
 import sys
 import datetime
 import time
+import pickle
 from tqdm import tqdm
+from sbvr.sbvr_cuda import sbvr_mat_vec_mult
 
 def r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
@@ -15,39 +17,6 @@ def y_str(s):
     return "\033[93m" + str(s) + "\033[0m"
 def b_str(s):
     return "\033[94m" + str(s) + "\033[0m"
-
-def print_tensor(tensor, name="Tensor"):
-    print(b_str(name) + ": " 
-          + g_str("shape: ") + str(tensor.shape))
-    print(tensor)
-    
-def get_errors(tensor1, tensor2):
-    if tensor1.shape != tensor2.shape:
-        raise ValueError("Tensors must have the same shape")
-    
-    errors = tensor1 - tensor2
-    mse = torch.mean(errors ** 2).item()
-    max_error = torch.max(errors).item()
-    min_error = torch.min(errors).item()
-    std_dev = torch.std(errors).item()
-    
-    return mse, max_error, min_error, std_dev
-        
-def print_errors(tensor1, tensor2):
-    if tensor1.shape != tensor2.shape:
-        raise ValueError("Tensors must have the same shape")
-    
-    mse, max_error, min_error, std_dev = get_errors(tensor1, tensor2)
-    print(r_str("Errors: ") + 
-          y_str("Mean: ") + f"{mse:.4e}" + ", " +
-          y_str("Max: ") + f"{max_error:.4e}" + ", " +
-          y_str("Min: ") + f"{min_error:.4e}" + ", " +
-          y_str("Std. Dev.: ") + f"{std_dev:.4e}")
-    
-def f64_matmul(mat_a, mat_b):
-    if mat_a.shape[1] != mat_b.shape[0]:
-        raise ValueError("Incompatible matrix shapes for multiplication")
-    return (mat_a.to(torch.float64) @ mat_b.to(torch.float64)).to(torch.float64)
 
 class sbvr(): 
     def __init__(self, 
@@ -66,7 +35,8 @@ class sbvr():
                  compute_dtype: torch.dtype = torch.float16):
         if data is None:
             raise ValueError(r_str("Data cannot be None"))
-            
+        
+        self.use_bias = True
         self.num_sums = num_sums
         self.verbose_level = verbose_level
         self.coeff_group_size = coeff_group_size
@@ -77,9 +47,13 @@ class sbvr():
                 r_str("Warning: compute_dtype float16 does not have sufficient "
                       "precision for num_sums > 11."))
         
-        self.r_search_num = r_search_num
-        self.s_search_num = s_search_num
         self.b_search_num = b_search_num
+        if not self.use_bias:
+            self.r_search_num = r_search_num * 2
+            self.s_search_num = s_search_num * 2
+        else:
+            self.r_search_num = r_search_num
+            self.s_search_num = s_search_num
         
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
@@ -199,6 +173,10 @@ class sbvr():
                               device=data.device, dtype=data.dtype)
         b_list = torch.arange(b_min + b_gran, b_max + b_gran, b_gran, 
                               device=data.device, dtype=data.dtype)
+        if not self.use_bias:
+            r_list = -r_list
+            b_list = torch.tensor([0], device=data.device, dtype=data.dtype)
+        
         return self._get_coeff_search_space_from_lists(r_list, b_list, s_list)
     
     @torch.inference_mode()
@@ -352,16 +330,6 @@ class sbvr():
                 ", " + y_str("(bias, r, s): ") +
                 f"{best_bias:.4e}, {best_r:.4e}, {best_s:.4e}" +
                 y_str("\n\t\tCoeff: ") + str(best_coeff_str))
-        all_points = self._get_all_points(self.bias_cache[best_bias_idx],
-                                          self.coeff_cache[best_coeff_idx])
-        # print (f"Group {self.group_idx}: Coeff idx: {best_coeff_idx}, " +
-        #        f"Bias idx: {best_bias_idx}, " +
-        #        f"Bias: {self.bias_cache[best_bias_idx]:.4e}, " +
-        #        f"Coeff: {self.coeff_cache[best_coeff_idx].tolist()}")
-        # print (f"Group {self.group_idx}: Coeff sel: " +
-        #        f"{best_coeff_sel.tolist()}")
-        # print (f"Group {self.group_idx}: All points: " +
-        #        f"{all_points.tolist()}")
                 
         return best_coeff_idx, best_bias_idx, best_coeff_sel
     
@@ -472,6 +440,10 @@ class sbvr():
         
         return decoded_tensor
     
+    @torch.inference_mode()
+    def cuda_matrix_vec_mul(self, vec1, vec2):
+        return sbvr_mat_vec_mult(vec1, vec2)
+
     def get_sbvr_info(self):
         info_str = b_str("SBVR Info:") + \
         y_str("\n\tOriginal Data Type: ") + str(self.original_dtype) + \
@@ -482,56 +454,14 @@ class sbvr():
         y_str("\n\tBinary Vector Data Type: ") + str(self.bvr_dtype) + \
         y_str("\n\tCoefficient Tensor Size: ") + str(self.coeff.shape)
         return info_str
-
-
-def sbvr_randn_test(mat_len=512, sbvr_max_sums=6):
-    torch.manual_seed(0)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(0)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (mat_len, mat_len)
-
-    mat_a = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
-    mat_b = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
-    # print_tensor(mat_b, "mat_b")
-
-    mat_c_64 = f64_matmul(mat_a, mat_b)
-    mat_c_32 = f64_matmul(mat_a.to(torch.float32), mat_b.to(torch.float32))
-    mat_c_16 = f64_matmul(mat_a.to(torch.float16), mat_b.to(torch.float16))
-    mat_c_bf16 = f64_matmul(mat_a.to(torch.bfloat16), mat_b.to(torch.bfloat16))
-    mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), 
-                              mat_b.to(torch.float8_e4m3fn))
-    mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), 
-                            mat_b.to(torch.float8_e5m2))
-    time_dict = {}
-    sbvr_dict = {}
-    for i in range (sbvr_max_sums, 1, -2):
-        time_start = time.time()
-        sbvr_matmul = f64_matmul(sbvr(mat_a, num_sums=i).get_decoded_tensor(), 
-                                sbvr(mat_b, num_sums=i).get_decoded_tensor())
-        sbvr_dict[i] = sbvr_matmul
-        time_dict[i] = time.time() - time_start
-
-    print(y_str("Matix Size: ") + str(mat_size))
-    print(b_str("Case 1: Conversion to float32"))
-    print_errors(mat_c_64, mat_c_32)
-    print(b_str("Case 2: Conversion to float16"))
-    print_errors(mat_c_64, mat_c_16)
-    print(b_str("Case 3: Conversion to bfloat16")) 
-    print_errors(mat_c_64, mat_c_bf16)
-    print(b_str("Case 4: Conversion to float8_e4m3fn"))
-    print_errors(mat_c_64, mat_c_e4m3fn)
-    print(b_str("Case 5: Conversion to float8_e5m2"))
-    print_errors(mat_c_64, mat_c_e5m2)
-    for i, (key, value) in enumerate(sbvr_dict.items()):
-        print(b_str(f"Case {i+6}: Conversion to SBVR {key} bits"))
-        print_errors(mat_c_64, value)
-        print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
     
-if __name__ == "__main__":
-    mat_len = sys.argv[1]
-    sbvr_max_sums = sys.argv[2]
-    time_start = time.time()
-    sbvr_randn_test(int(mat_len), int(sbvr_max_sums))
-    print (f"Total time taken: {time.time() - time_start:.4f} seconds")
+def save_sbvr(sbvr_obj, filename):
+    if not isinstance(sbvr_obj, sbvr):
+        raise ValueError("The object is not a valid SBVR object.")
+    torch.save(sbvr_obj, filename)
+        
+def load_sbvr(filename) -> sbvr:
+    sbvr_obj = torch.load(filename)
+    if not isinstance(sbvr_obj, sbvr):
+        raise ValueError("The loaded object is not a valid SBVR object.")
+    return sbvr_obj
