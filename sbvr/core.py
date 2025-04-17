@@ -75,12 +75,12 @@ class sbvr():
         self.cache_idx_dtype = torch.uint8
         self.cache_warmup_num = cache_warmup_num
         elem_size = torch.tensor(0, dtype=self.cache_idx_dtype).element_size() 
-        self.coeff_cache = torch.zeros((128, num_sums),
+        self.coeff_cache = torch.zeros((2**(8*elem_size), num_sums),
             dtype=self.compute_dtype, device=data.device)
-        self.bias_cache = torch.zeros((80),
+        self.bias_cache = torch.zeros((2**(8*elem_size)),
             dtype=self.compute_dtype, device=data.device)
-        assert self.coeff_cache.shape[0] < 2**(8*elem_size)
-        assert self.bias_cache.shape[0] < 2**(8*elem_size)
+        assert self.coeff_cache.shape[0] <= 2**(8*elem_size)
+        assert self.bias_cache.shape[0] <= 2**(8*elem_size)
         self.mse_window_size = mse_window_size
         self.acceptable_mse = 10**-12
         self.mse_history = []
