@@ -1,6 +1,8 @@
 from transformers import LlamaForCausalLM, AutoTokenizer, BitsAndBytesConfig, FineGrainedFP8Config
 from models.sbvr_llama import SBVRLlamaForCausalLM
 import torch
+import sbvr
+import os
 
 from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
@@ -13,7 +15,8 @@ def decompress_sbvr_llama(weight_path=None, model=None):
 
 @torch.no_grad()
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
-              device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False):
+              device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False,
+              weight_path:str = None):
     r'''
     Fetch llama model from huggingfaces
 
@@ -24,12 +27,15 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
         tokenizer_path = model_path
         
     if use_sbvr:
+        if weight_path is None:
+            raise ValueError("weight_path cannot be None when use_sbvr is True")
         logger.info("Using SBVR Llama model")
         model = SBVRLlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map=device_map
         )
+        sbvr_decompress_on_llama(model, weight_path)
     elif use_llm_int8:
         logger.info("Using Llama model with LLM.int8")
         quantization_config = BitsAndBytesConfig(
@@ -60,6 +66,31 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
     
     return model, tokenizer
 
+
+@torch.inference_mode()
+def sbvr_decompress_on_llama(model, weight_path:str=None):
+    if weight_path is None:
+        raise ValueError("weight_path cannot be None")
+    
+    attn_weights_name = ["q", "k", "v"]
+    ffn_weights_name = ["gate_proj", "down_proj", "up_proj"]
+ 
+    for i, layer in enumerate(model.model.layers):
+        layer_path = os.path.join(weight_path, f"layer_{i}_")
+        for weight_name in attn_weights_name:
+            device = layer.self_attn.__getattr__(weight_name + "_proj").weight.device
+            weight_path = os.path.join(layer_path, f"{weight_name}.pt")
+            sbvr_weight = sbvr.load_sbvr(weight_path)
+            layer.self_attn.__getattr__(weight_name + "_proj").weight = sbvr_weight.decode().to(device)
+            logger.info(f"Decompressed {weight_name} weight from {weight_path}")
+        for weight_name in ffn_weights_name:
+            device = layer.mlp.__getattr__(weight_name).weight.device
+            weight_path = os.path.join(layer_path, f"{weight_name}.pt")
+            sbvr_weight = sbvr.load_sbvr(weight_path)
+            layer.mlp.__getattr__(weight_name).weight = sbvr_weight.decode().to(device)
+            logger.info(f"Decompressed {weight_name} weight from {weight_path}")
+            
+    logger.info("Decompression complete")
 
 @torch.no_grad()
 def get_layer_ffn_weight(model, layer_idx):
