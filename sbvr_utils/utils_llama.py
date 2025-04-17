@@ -80,13 +80,13 @@ def sbvr_decompress_on_llama(model, weight_path:str=None):
         for weight_name in attn_weights_name:
             device = layer.self_attn.__getattr__(weight_name + "_proj").weight.device
             weight_path = os.path.join(layer_path, f"{weight_name}.pt")
-            sbvr_weight = sbvr.load_sbvr(weight_path)
+            sbvr_weight = sbvr.load_sbvr(weight_path, device=device)
             layer.self_attn.__getattr__(weight_name + "_proj").weight = sbvr_weight.decode().to(device)
             logger.info(f"Decompressed {weight_name} weight from {weight_path}")
         for weight_name in ffn_weights_name:
             device = layer.mlp.__getattr__(weight_name).weight.device
             weight_path = os.path.join(layer_path, f"{weight_name}.pt")
-            sbvr_weight = sbvr.load_sbvr(weight_path)
+            sbvr_weight = sbvr.load_sbvr(weight_path, device=device)
             layer.mlp.__getattr__(weight_name).weight = sbvr_weight.decode().to(device)
             logger.info(f"Decompressed {weight_name} weight from {weight_path}")
             
