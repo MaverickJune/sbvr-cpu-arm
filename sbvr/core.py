@@ -25,7 +25,7 @@ class sbvr():
                  use_bias: bool = False,
                  verbose_level: int = 1,
                  cgroup_len: int = 128,
-                 r_search_num = 80,
+                 r_search_num = 128,
                  s_search_num = 64,
                  b_search_num = 64,
                  cache_warmup_num = 8,
@@ -53,12 +53,8 @@ class sbvr():
                       "precision for num_sums > 11."))
         
         self.b_search_num = b_search_num
-        if not self.use_bias:
-            self.r_search_num = r_search_num * 2
-            self.s_search_num = s_search_num * 2
-        else:
-            self.r_search_num = r_search_num
-            self.s_search_num = s_search_num
+        self.r_search_num = r_search_num
+        self.s_search_num = s_search_num
         
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
@@ -201,6 +197,9 @@ class sbvr():
         if not self.use_bias:
             r_list = -r_list
             b_list = torch.tensor([0], device=data.device, dtype=data.dtype)
+            self.bias_cache = torch.zeros((1),
+                dtype=self.compute_dtype, device=data.device)
+            self.num_bias_cache_lines = 1
         
         return self._get_coeff_search_space_from_lists(r_list, b_list, s_list)
     
