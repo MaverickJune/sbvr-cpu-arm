@@ -19,7 +19,8 @@ void launch_sbvr_mm(uint32_t* l_bvr,
                     __half* out,
                     int out_rows,
                     int out_cols,
-                    int num_sums,
+                    int l_num_sums,
+                    int r_num_sums,
                     int cgroup_per_inner_vec,
                     int bvr_per_cgroup,
                     int cache_size,
@@ -53,7 +54,8 @@ torch::Tensor sbvr_mm(torch::Tensor l_bvr,
 
     int out_rows = l_bvr.size(0);
     int out_cols = r_bvr.size(0);
-    int num_sums = l_bvr.size(1);
+    int l_num_sums = l_bvr.size(1);
+    int r_num_sums = r_bvr.size(1);
     int cgroup_per_inner_vec = l_bvr.size(2);
     int bvr_per_cgroup = l_bvr.size(3);
     int cache_size = l_coeff_cache.size(0);
@@ -76,7 +78,8 @@ torch::Tensor sbvr_mm(torch::Tensor l_bvr,
         reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
         out_rows,
         out_cols,
-        num_sums,
+        l_num_sums,
+        r_num_sums,
         cgroup_per_inner_vec,
         bvr_per_cgroup,
         cache_size,

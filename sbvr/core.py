@@ -25,12 +25,12 @@ class sbvr():
                  use_bias: bool = True,
                  verbose_level: int = 1,
                  cgroup_len: int = 128,
-                 r_search_num = 80,
-                 s_search_num = 48,
-                 b_search_num = 48,
+                 r_search_num = 60,
+                 s_search_num = 32,
+                 b_search_num = 32,
                  cache_warmup_num = 8,
                  mse_window_size: int = 20,
-                 search_extend_ratio: float = 1.6,
+                 search_extend_ratio: float = 1.25,
                  compute_dtype: torch.dtype = torch.float16):
         if data is None:
             raise ValueError(r_str("Data cannot be None"))
@@ -68,8 +68,8 @@ class sbvr():
         elem_size = torch.tensor(0, dtype=self.compute_dtype).element_size()
         diff_mat_size = 3 * b_search_num * self.extend_ratio * \
             (2**self.num_sums) * cgroup_len * elem_size
-        total_mem = torch.cuda.mem_get_info()[0]
-        self.search_batch_size = int(total_mem * 0.9 / diff_mat_size)
+        total_mem = torch.cuda.mem_get_info(data.device)[0]
+        self.search_batch_size = int(total_mem * 0.8 / diff_mat_size)
         
         # Cache settings
         self.cache_idx_dtype = torch.uint8
@@ -95,11 +95,13 @@ class sbvr():
         )
         
         # Pad the data to the nearest multiple of cgroup_len
-        pad_length = (data.shape[-1] + self.cgroup_len - 1) // self.cgroup_len * self.cgroup_len
+        pad_length = (data.shape[-1] + self.cgroup_len - 1) // \
+                        self.cgroup_len * self.cgroup_len
         if pad_length != data.shape[-1]:
             new_shape = list(data.shape)
             new_shape[-1] = pad_length
-            data_padded = torch.zeros(new_shape, dtype=data.dtype, device=data.device)
+            data_padded = torch.zeros(new_shape, 
+                                      dtype=data.dtype, device=data.device)
             slices = tuple(slice(0, s) for s in data.shape)
             data_padded[slices] = data
         else:
@@ -300,7 +302,8 @@ class sbvr():
         if not self.check_coeff_cache_full():
             coeff_search_space, r_list, b_list, s_list = \
                 self._get_coeff_search_space(data, 
-                                            (self.cache_hits/self.group_idx) > 0.4)
+                                            (self.cache_hits/self.group_idx) 
+                                                > 0.6)
             if self.check_bias_cache_full():
                 b_list = self.bias_cache[:self.num_bias_cache_lines]  
                 
@@ -309,8 +312,9 @@ class sbvr():
             # Search the cache for the best coeff and bias
             old_min_mse = min_mse  
             min_mse, new_coeff_idx, new_bias_idx, new_coeff_sel = \
-                    self._search_coeff_bias_space(coeff_search_space, biased_data,
-                                                min_mse)
+                    self._search_coeff_bias_space(coeff_search_space, 
+                                                  biased_data,
+                                                  min_mse)
             if min_mse >= old_min_mse:
                 # If the new search space is NOT better than the cached one:
                 min_mse = old_min_mse
@@ -321,10 +325,9 @@ class sbvr():
                 # Cache the results
                 coeff_diff = self.coeff_cache - \
                     coeff_search_space[new_coeff_idx].unsqueeze(0)
-                avg_abs_coeff = \
-                    self.coeff_cache[:self.num_coeff_cache_lines].abs().mean()
+                avg_abs_coeff = coeff_search_space[new_coeff_idx].abs().sum(-1)
                 mask = \
-                    coeff_diff.abs().sum(-1) < avg_abs_coeff*0.005*self.num_sums
+                    coeff_diff.abs().sum(-1) < avg_abs_coeff*0.001
                 if mask.any():
                     # If the coeff is already in the cache, use it
                     nonzero_idx = mask.nonzero(as_tuple=True)[0]
@@ -335,11 +338,9 @@ class sbvr():
                     best_coeff_idx = self.num_coeff_cache_lines
                     self.num_coeff_cache_lines += 1
                 if not self.check_bias_cache_full():
-                    bias_diff = \
-                        self.bias_cache - b_list[new_bias_idx]
-                    avg_abs_bias = \
-                        self.bias_cache[:self.num_bias_cache_lines].abs().mean()
-                    mask = bias_diff.abs() < avg_abs_bias*0.005
+                    bias_diff = self.bias_cache - b_list[new_bias_idx]
+                    avg_abs_bias = b_list[new_bias_idx].abs().mean()
+                    mask = bias_diff.abs() < avg_abs_bias*0.001
                     if mask.any():
                         # If the bias is already in the cache, use it
                         nonzero_idx = mask.nonzero(as_tuple=True)[0]
