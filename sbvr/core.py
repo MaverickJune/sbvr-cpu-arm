@@ -75,10 +75,12 @@ class sbvr():
         self.cache_idx_dtype = torch.uint8
         self.cache_warmup_num = cache_warmup_num
         elem_size = torch.tensor(0, dtype=self.cache_idx_dtype).element_size() 
-        self.coeff_cache = torch.zeros((2**(elem_size * 8), num_sums),
+        self.coeff_cache = torch.zeros((128, num_sums),
             dtype=self.compute_dtype, device=data.device)
-        self.bias_cache = torch.zeros((2**(elem_size * 8)),
+        self.bias_cache = torch.zeros((80),
             dtype=self.compute_dtype, device=data.device)
+        assert self.coeff_cache.shape[0] < 2**(8*elem_size)
+        assert self.bias_cache.shape[0] < 2**(8*elem_size)
         self.mse_window_size = mse_window_size
         self.acceptable_mse = 10**-12
         self.mse_history = []
@@ -111,16 +113,12 @@ class sbvr():
     @torch.inference_mode()
     def check_coeff_cache_full(self):
         if self.num_coeff_cache_lines >= self.coeff_cache.shape[0]:
-            print(r_str("Warning: Coefficient cache is full - Cache size: ") +
-                  f"{self.coeff_cache.shape[0]}")
             return True
         return False
 
     @torch.inference_mode()
     def check_bias_cache_full(self):
         if self.num_bias_cache_lines >= self.bias_cache.shape[0]:
-            print(r_str("Warning: Bias cache is full. - Cache size: ") +
-                  f"{self.bias_cache.shape[0]}")
             return True
         return False
         
@@ -299,50 +297,70 @@ class sbvr():
                 print(b_str("\n\tRun ") + f"{self.group_idx}: " +
                     r_str("Warming up cache... "))
 
-        # Setup the search space
-        coeff_search_space, r_list, b_list, s_list = \
-            self._get_coeff_search_space(data, 
-                                         (self.cache_hits/self.group_idx) > 0.4)
-        biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
-        
-        # Search the cache for the best coeff and bias
-        old_min_mse = min_mse  
-        min_mse, new_coeff_idx, new_bias_idx, new_coeff_sel = \
-                self._search_coeff_bias_space(coeff_search_space, biased_data,
-                                               min_mse)
-        if min_mse >= old_min_mse:
-            # If the new search space is NOT better than the cached one:
-            min_mse = old_min_mse
-            best_r = -1
-            best_s = -1
-        else:
-            # If the new search space is better than the cached one:
-            # Cache the results
-            save_fail = False
-            if not self.check_coeff_cache_full():
-                self.coeff_cache[self.num_coeff_cache_lines] =\
-                    coeff_search_space[new_coeff_idx]
-                self.num_coeff_cache_lines += 1
+        if not self.check_coeff_cache_full():
+            coeff_search_space, r_list, b_list, s_list = \
+                self._get_coeff_search_space(data, 
+                                            (self.cache_hits/self.group_idx) > 0.4)
+            if self.check_bias_cache_full():
+                b_list = self.bias_cache[:self.num_bias_cache_lines]  
+                
+            biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
+            
+            # Search the cache for the best coeff and bias
+            old_min_mse = min_mse  
+            min_mse, new_coeff_idx, new_bias_idx, new_coeff_sel = \
+                    self._search_coeff_bias_space(coeff_search_space, biased_data,
+                                                min_mse)
+            if min_mse >= old_min_mse:
+                # If the new search space is NOT better than the cached one:
+                min_mse = old_min_mse
+                best_r = -1
+                best_s = -1
             else:
-                save_fail = True
-            if not self.check_bias_cache_full():
-                self.bias_cache[self.num_bias_cache_lines] = \
-                    b_list[new_bias_idx]
-                self.num_bias_cache_lines += 1
-            else:
-                save_fail = True
-            if not save_fail:
+                # If the new search space is better than the cached one:
+                # Cache the results
+                coeff_diff = self.coeff_cache - \
+                    coeff_search_space[new_coeff_idx].unsqueeze(0)
+                avg_abs_coeff = \
+                    self.coeff_cache[:self.num_coeff_cache_lines].abs().mean()
+                mask = \
+                    coeff_diff.abs().sum(-1) < avg_abs_coeff*0.005*self.num_sums
+                if mask.any():
+                    # If the coeff is already in the cache, use it
+                    nonzero_idx = mask.nonzero(as_tuple=True)[0]
+                    best_coeff_idx = nonzero_idx[0]
+                else:
+                    self.coeff_cache[self.num_coeff_cache_lines] =\
+                        coeff_search_space[new_coeff_idx]
+                    best_coeff_idx = self.num_coeff_cache_lines
+                    self.num_coeff_cache_lines += 1
+                if not self.check_bias_cache_full():
+                    bias_diff = \
+                        self.bias_cache - b_list[new_bias_idx]
+                    avg_abs_bias = \
+                        self.bias_cache[:self.num_bias_cache_lines].abs().mean()
+                    mask = bias_diff.abs() < avg_abs_bias*0.005
+                    if mask.any():
+                        # If the bias is already in the cache, use it
+                        nonzero_idx = mask.nonzero(as_tuple=True)[0]
+                        best_bias_idx = nonzero_idx[0]
+                    else:
+                        self.bias_cache[self.num_bias_cache_lines] = \
+                            b_list[new_bias_idx]
+                        best_bias_idx = self.num_bias_cache_lines
+                        self.num_bias_cache_lines += 1
+                else:
+                    best_bias_idx = new_bias_idx
+
                 # If caching was successful, update the output
-                best_bias_idx = self.num_bias_cache_lines - 1
-                best_coeff_idx = self.num_coeff_cache_lines - 1
                 best_coeff_sel = new_coeff_sel
                 best_coeff_str = ['%.4f' % elem for elem in \
                     self.coeff_cache[best_coeff_idx].tolist()]
                 best_bias = self.bias_cache[best_bias_idx].item()
                 best_r = r_list[new_coeff_idx % len(r_list)]
                 best_s = s_list[new_coeff_idx // len(r_list)]   
-            self.mse_history.append(min_mse)
-            
+                self.mse_history.append(min_mse)
+                
         if self.verbose_level > 0:
             print(g_str("\tBest MSE: ") + f"{min_mse:.4e}" +
                 ", " + y_str("(bias, r, s): ") +

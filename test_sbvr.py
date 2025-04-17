@@ -66,8 +66,12 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6):
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
         time_start = time.time()
-        sbvr_matmul = f64_matmul(sbvr.sbvr(mat_a, num_sums=i).decode(), 
-                                 sbvr.sbvr(mat_b, num_sums=i).decode())
+        mat_a_sbvr = sbvr.sbvr(mat_a, num_sums=i)
+        mat_b_sbvr = sbvr.sbvr(mat_b, num_sums=i)
+        sbvr.save_sbvr(mat_a_sbvr, f"mat_a_{mat_len}_sbvr_{i}.pt")
+        sbvr.save_sbvr(mat_b_sbvr, f"mat_b_{mat_len}_sbvr_{i}.pt")
+        sbvr_matmul = f64_matmul(mat_a_sbvr.decode(), 
+                                 mat_b_sbvr.decode())
         sbvr_dict[i] = sbvr_matmul
         time_dict[i] = time.time() - time_start
 
@@ -116,8 +120,8 @@ if __name__ == "__main__":
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
     
-    # time_start = time.time()
-    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums))
-    # print (f"Total time taken: {time.time() - time_start:.4f} seconds")
+    time_start = time.time()
+    sbvr_randn_test(int(mat_len), int(sbvr_max_sums))
+    print (f"Total time taken: {time.time() - time_start:.4f} seconds")
     
-    sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums))
+    # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums))
