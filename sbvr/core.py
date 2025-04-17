@@ -31,7 +31,16 @@ class sbvr():
                  cache_warmup_num = 8,
                  mse_window_size: int = 20,
                  search_extend_ratio: float = 1.25,
-                 compute_dtype: torch.dtype = torch.float16):
+                 compute_dtype: torch.dtype = torch.float16,
+                 load_only: bool = False,
+                 **kwargs):
+        if load_only:
+            def load_from_kwargs(self, **kwargs):
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+            load_from_kwargs(self, **kwargs)
+            return
+        
         if data is None:
             raise ValueError(r_str("Data cannot be None"))
         
@@ -557,10 +566,27 @@ class sbvr():
 def save_sbvr(sbvr_obj, filename):
     if not isinstance(sbvr_obj, sbvr):
         raise ValueError("The object is not a valid SBVR object.")
-    torch.save(sbvr_obj, filename)
+    save_dict = {
+        "padded_data_shape": sbvr_obj.padded_data_shape,
+        "original_dtype": sbvr_obj.original_dtype,
+        "coeff_idx": sbvr_obj.coeff_idx,
+        "num_sums": sbvr_obj.num_sums,
+        "bvr": sbvr_obj.bvr,
+        "bvr_num_bits": sbvr_obj.bvr_num_bits,
+        "coeff_sel_len": sbvr_obj.coeff_sel_len,
+        "cgroup_len": sbvr_obj.cgroup_len,
+        "bias_idx": sbvr_obj.bias_idx,
+        "bias_cache": sbvr_obj.bias_cache,
+        "coeff_cache": sbvr_obj.coeff_cache,
+        "bin_combs": sbvr_obj.bin_combs,
+        "original_data_shape": sbvr_obj.original_data_shape,
+        "bvr_dtype": sbvr_obj.bvr_dtype,
+        "compute_dtype": sbvr_obj.compute_dtype,
+    }
+    torch.save(save_dict, filename)
         
 def load_sbvr(filename) -> sbvr:
-    sbvr_obj = torch.load(filename)
-    if not isinstance(sbvr_obj, sbvr):
-        raise ValueError("The loaded object is not a valid SBVR object.")
+    save_dict = torch.load(filename)
+    sbvr_obj = sbvr(load_only=True, **save_dict)
+    
     return sbvr_obj
