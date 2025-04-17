@@ -2,12 +2,12 @@ from sbvr_utils.utils import eval_ppl
 from sbvr_utils.utils_llama import get_llama
 
 
-def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=False):
+def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=False, weight_path=None):
     if not model_path:
-        raise ValueError("model_path cannot be None")
+        raise ValueError("model_path  cannot be None")
     
     if use_sbvr:
-        raise NotImplementedError("Not yet implemented")
+        model, tokenizer = get_llama(model_path=model_path, device_map="cuda:0", use_sbvr=True, weight_path=weight_path)
     elif use_llm_int8:
         model, tokenizer = get_llama(model_path=model_path, device_map="cuda:0", use_llm_int8=True)
     elif use_fp8:
@@ -19,8 +19,10 @@ def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=Fa
     
 if __name__ == "__main__":
     MODEL_PATH = "meta-llama/Llama-3.2-3B"
+    WEIGHT_PATH = "/home/nxclab/wonjun/bvq/compressed_weights"
     
-    measure_llama_ppl(model_path=MODEL_PATH)
+    # measure_llama_ppl(model_path=MODEL_PATH)
     # measure_llama_ppl(model_path=MODEL_PATH, use_llm_int8=True)
     # measure_llama_ppl(model_path=MODEL_PATH, use_fp8=True)
+    measure_llama_ppl(model_path=MODEL_PATH, use_sbvr=True, weight_path=WEIGHT_PATH)
     

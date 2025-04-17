@@ -34,6 +34,9 @@ class sbvr():
                 for key, value in kwargs.items():
                     setattr(self, key, value)
             load_from_kwargs(self, **kwargs)
+            self.num_sums = num_sums
+            self.cgroup_len = cgroup_len
+            self.compute_dtype = compute_dtype
             return
         
         if data is None:
@@ -517,7 +520,7 @@ def save_sbvr(sbvr_obj, filename):
     }
     torch.save(save_dict, filename)
 
-def load_sbvr(filename, device=None) -> sbvr:
+def load_sbvr(filename, device=None, verbose=0) -> sbvr:
     if device is None:
         raise ValueError("Device cannot be None")
     save_dict = torch.load(filename)
@@ -526,5 +529,11 @@ def load_sbvr(filename, device=None) -> sbvr:
             save_dict[k] = v.to(device)
     save_dict["coeff_idx"] = save_dict["coeff_idx"].to(torch.uint16)
     save_dict["bvr"] = save_dict["bvr"].to(torch.uint32)
+    
+    if verbose == 1:
+        for k, v in save_dict.items():
+            if not isinstance(v, torch.Tensor):
+                print(f"{k}: {v}")
+    
     sbvr_obj = sbvr(decode_only=True, **save_dict)
     return sbvr_obj
