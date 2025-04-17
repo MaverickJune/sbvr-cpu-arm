@@ -31,7 +31,8 @@ def get_errors(tensor1, tensor2):
         
 def print_errors(tensor1, tensor2):
     if tensor1.shape != tensor2.shape:
-        raise ValueError("Tensors must have the same shape")
+        raise ValueError(f"Tensors must have the same shape: "
+                         f"{tensor1.shape} vs {tensor2.shape}")
     
     mse, max_error, min_error, std_dev = get_errors(tensor1, tensor2)
     print(r_str("Errors: ") + 
@@ -91,26 +92,44 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6):
         print_errors(mat_c_64, value)
         print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
         
-def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6):
+def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6, do_print = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_a = torch.randn((1, mat_len), dtype=torch.float64, device=device)*0.3
+    mat_a = torch.tensor([[1, 0, 3.14, 0]], dtype=torch.float64, device=device)
+    mat_b = torch.tensor([[1, 0, 0, 0],
+                          [0, 0, 0, 0],
+                          [1, 0, 1, 0],
+                          [0, 0, 0, 0],], 
+                        dtype=torch.float64, device=device)
+    mat_a = torch.randn((mat_len, mat_len), dtype=torch.float64, device=device)*0.3
     mat_b = torch.randn((mat_len, mat_len), 
                         dtype=torch.float64, device=device)*0.3
-    print_tensor(mat_a, "mat_a")
-    print_tensor(mat_b, "mat_b")
-    
     mat_mat_ab = mat_a @ mat_b.T
-    print_tensor(mat_mat_ab, "mat_mat_ab")
+    if do_print:
+        print_tensor(mat_a, "mat_a")
+        print_tensor(mat_b.T, "mat_b_T")
+        print_tensor(mat_mat_ab, "mat_mat_ab")
     
-    sbvr_mat_a = sbvr.sbvr(mat_a, num_sums=sbvr_max_sums)
-    sbvr_mat_b = sbvr.sbvr(mat_b, num_sums=sbvr_max_sums)
-    print_tensor(sbvr_mat_a.decode(), "sbvr_mat_a")
-    print_tensor(sbvr_mat_b.decode(), "sbvr_mat_b")
+    sbvr_mat_a = sbvr.sbvr(mat_a, num_sums=sbvr_max_sums, 
+                           verbose_level=0, use_bias=True)
+    sbvr_mat_b = sbvr.sbvr(mat_b, num_sums=sbvr_max_sums, 
+                           verbose_level=0, use_bias=True)
     sbvr_decoded_mat_mat_ab = sbvr_mat_a.decode() @ sbvr_mat_b.decode().T
-    print_tensor(sbvr_decoded_mat_mat_ab, "sbvr_decoded_mat_mat_ab")
+    
+    if do_print:
+        print_tensor(sbvr_mat_a.decode(), "sbvr_mat_a")
+        print_tensor(sbvr_mat_b.decode().T, "sbvr_mat_b_T")
+        print_tensor(sbvr_decoded_mat_mat_ab, "sbvr_decoded_mat_mat_ab")
     
     sbvr_cuda_mat_mat_ab = sbvr_mat_a.cuda_mat_mat_t_mul(sbvr_mat_b)
-    print_tensor(sbvr_cuda_mat_mat_ab, "sbvr_cuda_mat_mat_ab")
+    if do_print:
+        print_tensor(sbvr_cuda_mat_mat_ab, "sbvr_cuda_mat_mat_ab")
+        
+    print(b_str("Case 1: SBVR decoded vs SBVR CUDA"))
+    print_errors(sbvr_decoded_mat_mat_ab, sbvr_cuda_mat_mat_ab)
+    print(b_str("Case 2: SBVR decoded vs Full precision"))
+    print_errors(sbvr_decoded_mat_mat_ab, mat_mat_ab)
+    print(b_str("Case 3: Full precision vs SBVR CUDA"))
+    print_errors(mat_mat_ab, sbvr_cuda_mat_mat_ab)
 
 if __name__ == "__main__":
     torch.manual_seed(0)

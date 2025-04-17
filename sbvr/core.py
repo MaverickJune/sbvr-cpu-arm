@@ -22,12 +22,12 @@ class sbvr():
     def __init__(self, 
                  data: torch.Tensor = None, 
                  num_sums: int = 4,
-                 use_bias: bool = True,
+                 use_bias: bool = False,
                  verbose_level: int = 1,
                  cgroup_len: int = 128,
-                 r_search_num = 60,
-                 s_search_num = 32,
-                 b_search_num = 32,
+                 r_search_num = 80,
+                 s_search_num = 64,
+                 b_search_num = 64,
                  cache_warmup_num = 8,
                  mse_window_size: int = 20,
                  search_extend_ratio: float = 1.25,
@@ -149,26 +149,27 @@ class sbvr():
         if not extended:
             r_max = (math.pi*2/3 + 0.1)
             r_min = 1.0
-            r_gran = (r_max - r_min) / self.r_search_num
-            b_max = data_avg 
+            r_gran = (r_max - r_min) / self.r_search_num 
+            b_max = data_avg
             b_min = data_min - abs(data_min) * 0.1
-            b_gran = (b_max - b_min) / self.b_search_num
-            s_max = (data_max - data_min) * 1.1
+            b_gran = (b_max - b_min) / self.b_search_num 
+            s_max = (data_max - data_min) * 1.1 
             s_min = (data_97 - data_avg) * 2.0
-            s_gran = (s_max - s_min) / self.s_search_num
+            s_gran = (s_max - s_min) / self.s_search_num 
         else:
             if self.verbose_level > 0:
                 print (r_str("\tUsing extended search space..."))
+            
             r_max = (math.pi*2/3 + 0.1)
             r_min = 1.0
-            r_gran = (r_max - r_min) / (self.r_search_num * extend_ratio)
+            r_gran = (r_max - r_min) / (self.r_search_num * extend_ratio) 
             b_max = data_avg + abs(data_avg) * 0.2
             b_min = data_min - abs(data_min) * 0.2
-            b_gran = (b_max - b_min) / (self.b_search_num * extend_ratio)
+            b_gran = (b_max - b_min) / (self.b_search_num * extend_ratio) 
             s_max = (data_max - data_min) * 1.2
             data_92 = torch.quantile(data.to(torch.float32), 0.92)
             s_min = (data_92 - data_avg) * 2.0
-            s_gran = (s_max - s_min) / (self.s_search_num * extend_ratio)
+            s_gran = (s_max - s_min) / (self.s_search_num * extend_ratio) 
         if self.verbose_level > 1:
             print(b_str("\tNum_sums: ") + f"{self.num_sums}",
                     ", " + y_str("Data range: ") + 
@@ -187,10 +188,16 @@ class sbvr():
         
         r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran, 
                               device=data.device, dtype=data.dtype)
-        s_list = torch.arange(s_min + s_gran, s_max + s_gran, s_gran, 
-                              device=data.device, dtype=data.dtype)
-        b_list = torch.arange(b_min + b_gran, b_max + b_gran, b_gran, 
-                              device=data.device, dtype=data.dtype)
+        if s_gran != 0:
+            s_list = torch.arange(s_min + s_gran, s_max + s_gran, s_gran, 
+                                device=data.device, dtype=data.dtype)
+        else:
+            s_list = torch.tensor([s_min], device=data.device, dtype=data.dtype)
+        if b_gran != 0:
+            b_list = torch.arange(b_min + b_gran, b_max + b_gran, b_gran, 
+                                  device=data.device, dtype=data.dtype)
+        else:
+            b_list = torch.tensor([b_min], device=data.device, dtype=data.dtype)
         if not self.use_bias:
             r_list = -r_list
             b_list = torch.tensor([0], device=data.device, dtype=data.dtype)
@@ -254,6 +261,8 @@ class sbvr():
     @torch.inference_mode()
     def _encode_data(self, data):
         min_mse = float("inf")
+        best_r = -1
+        best_s = -1
         self.group_idx += 1
         # Check cached search space
         if (self.num_coeff_cache_lines >= self.cache_warmup_num):
@@ -318,8 +327,6 @@ class sbvr():
             if min_mse >= old_min_mse:
                 # If the new search space is NOT better than the cached one:
                 min_mse = old_min_mse
-                best_r = -1
-                best_s = -1
             else:
                 # If the new search space is better than the cached one:
                 # Cache the results
@@ -372,7 +379,6 @@ class sbvr():
     
     @torch.inference_mode()
     def _encode_to_sbvr(self, data):
-        print(b_str("Encoding to SBVR..."))
         data_num = data.numel()
         num_cgroups = \
             (data_num + self.cgroup_len - 1) // self.cgroup_len
@@ -386,7 +392,7 @@ class sbvr():
                                      device=data.device)
         
         for i in tqdm(range(num_cgroups), ncols=80, 
-                      desc="Encoding groups", unit="group"):
+                      desc=b_str("Encoding SBVR groups"), unit="g"):
             torch.cuda.empty_cache()
             group_start = i * self.cgroup_len
             group_end = \
@@ -436,8 +442,8 @@ class sbvr():
             
         bvr_per_cgroup = self.cgroup_len // self.bvr_num_bits
         cgroup_per_inner_vec = self.padded_data_shape[-1] // self.cgroup_len
-        self.bvr = self.bvr.view(self.num_sums, -1, 
-                                 bvr_per_cgroup, cgroup_per_inner_vec)
+        self.bvr = self.bvr.view(self.num_sums, -1, cgroup_per_inner_vec,
+                                 bvr_per_cgroup)
         self.bvr = self.bvr.transpose(0, 1).contiguous()
      
     @torch.inference_mode()
@@ -514,30 +520,19 @@ class sbvr():
             raise ValueError(r_str("Incompatible SBVR vector data types: ") +
                              f"LHS BVR dtype: {self.bvr_dtype}, "
                              f"RHS BVR dtype: {rhs.bvr_dtype}")
-        # Number of coefficients groups per innermost vector
-        cgroup_per_inner_vec = \
-            self.padded_data_shape[-1] // self.cgroup_len
-            
+
         l_bvr = self.bvr
-        assert l_bvr.shape[0] == self.original_data_shape[0]
-        assert self.coeff_idx.shape[0] == l_bvr.shape[0] * cgroup_per_inner_vec
         l_coeff_idx = self.coeff_idx # [num_cgroups]
         l_bias_idx = self.bias_idx # [num_cgroups]
         l_coeff_cache = self.coeff_cache # [cache_lines, num_sums]
         l_bias_cache = self.bias_cache # [cache_lines]
         
         r_bvr = rhs.bvr
-        assert r_bvr.shape[0] == rhs.original_data_shape[0]
-        assert rhs.coeff_idx.shape[0] == r_bvr.shape[0] * cgroup_per_inner_vec
         r_coeff_idx = rhs.coeff_idx # [num_cgroups]
         r_bias_idx = rhs.bias_idx # [num_cgroups]
         r_coeff_cache = rhs.coeff_cache # [cache_lines, num_sums]
         r_bias_cache = rhs.bias_cache # [cache_lines]
         
-        print(l_bvr.dtype, l_coeff_idx.dtype, l_bias_idx.dtype,
-              l_coeff_cache.dtype, l_bias_cache.dtype)
-        print(r_bvr.dtype, r_coeff_idx.dtype, r_bias_idx.dtype,
-              r_coeff_cache.dtype, r_bias_cache.dtype)
         return sbvr_mm(l_bvr,
                        l_coeff_idx,
                        l_bias_idx,
@@ -547,7 +542,7 @@ class sbvr():
                        r_coeff_idx,
                        r_bias_idx,
                        r_coeff_cache,
-                       r_bias_cache).squeeze(0)
+                       r_bias_cache)
 
     def get_sbvr_info(self):
         info_str = b_str("SBVR Info:") + \
