@@ -71,6 +71,8 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6):
         mat_b_sbvr = sbvr.sbvr(mat_b, num_sums=i)
         sbvr.save_sbvr(mat_a_sbvr, f"mat_a_{mat_len}_sbvr_{i}.pt")
         sbvr.save_sbvr(mat_b_sbvr, f"mat_b_{mat_len}_sbvr_{i}.pt")
+        mat_a_sbvr = sbvr.load_sbvr(f"mat_a_{mat_len}_sbvr_{i}.pt")
+        mat_b_sbvr = sbvr.load_sbvr(f"mat_b_{mat_len}_sbvr_{i}.pt")
         sbvr_matmul = f64_matmul(mat_a_sbvr.decode(), 
                                  mat_b_sbvr.decode())
         sbvr_dict[i] = sbvr_matmul

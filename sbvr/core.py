@@ -83,11 +83,6 @@ class sbvr():
         self.cache_hits = 0
         self.group_idx = 0
         
-        self.bin_combs = torch.tensor(
-            list(itertools.product([0, 1], repeat=num_sums)),
-            dtype=self.compute_dtype, device=data.device
-        )
-        
         # Pad the data to the nearest multiple of cgroup_len
         pad_length = (data.shape[-1] + self.cgroup_len - 1) // \
                         self.cgroup_len * self.cgroup_len
@@ -107,14 +102,23 @@ class sbvr():
         self._change_coeff_sel_to_bvr(self._encode_to_sbvr(data_padded))
         
     @torch.inference_mode()
-    def check_coeff_cache_full(self):
+    def _get_bin_combs(self):
+        if not hasattr(self, 'bin_combs'):
+            self.bin_combs = torch.tensor(
+                list(itertools.product([0, 1], repeat=self.num_sums)),
+                dtype=self.compute_dtype, device=self.coeff_cache.device
+            )
+        return self.bin_combs
+        
+    @torch.inference_mode()
+    def _check_coeff_cache_full(self):
         if self.num_coeff_cache_lines >= self.coeff_cache.shape[0]:
             return True
         return False
         
     @torch.inference_mode()
     def _get_all_points(self, coeff: torch.tensor):
-        return self.bin_combs @ coeff
+        return self._get_bin_combs() @ coeff
     
     @torch.inference_mode()
     def _get_coeff_search_space_from_lists(self, r_list, b_list, s_list):
@@ -183,7 +187,7 @@ class sbvr():
     
     @torch.inference_mode()
     def _get_min_mse_coeff(self, data, search_matrix):
-        candidiate_matrix = search_matrix @ self.bin_combs.T
+        candidiate_matrix = search_matrix @ self._get_bin_combs().T
         
         n_ss_row = candidiate_matrix.shape[0]
         n_ss_col = candidiate_matrix.shape[1]
@@ -270,7 +274,7 @@ class sbvr():
                 print(b_str("\n\tRun ") + f"{self.group_idx}: " +
                     r_str("Warming up cache... "))
 
-        if not self.check_coeff_cache_full():
+        if not self._check_coeff_cache_full():
             coeff_search_space, r_list, b_list, s_list = \
                 self._get_coeff_search_space(data, 
                                             (self.cache_hits/self.group_idx) 
@@ -358,15 +362,15 @@ class sbvr():
             
     @torch.inference_mode()
     def _change_coeff_sel_to_bvr(self, coeff_sel):
-        self.coeff_sel_len = coeff_sel.shape[0]
+        coeff_sel_len = self.original_data_shape.numel()
         num_bits = self.bvr_num_bits
-        padded_len = (self.coeff_sel_len + num_bits - 1) // num_bits * num_bits
+        padded_len = (coeff_sel_len + num_bits - 1) // num_bits * num_bits
         self.bvr = torch.zeros((self.num_sums, (padded_len // num_bits)),
                           dtype=self.bvr_dtype, device=self.coeff_cache.device)
         powers = 2 ** torch.arange(num_bits, dtype=torch.int64, 
                                    device=self.coeff_cache.device)
         coeff_sel = torch.cat((coeff_sel, 
-                               torch.zeros(padded_len - self.coeff_sel_len,
+                               torch.zeros(padded_len - coeff_sel_len,
                                            dtype=coeff_sel.dtype,
                                            device=coeff_sel.device)))
         iter_size = 65536
@@ -387,21 +391,22 @@ class sbvr():
      
     @torch.inference_mode()
     def _change_bvr_to_coeff_sel(self):
+        coeff_sel_len = self.original_data_shape.numel()
         bvr = self.bvr.transpose(0, 1).contiguous().view(self.num_sums, -1)
         num_bits = self.bvr_num_bits
         powers = 2 ** torch.arange(num_bits, 
                                    dtype=torch.int64, 
                                    device=self.coeff_cache.device)
-        coeff_sel = torch.empty((self.coeff_sel_len),
+        coeff_sel = torch.empty((coeff_sel_len),
                                dtype=torch.int32, 
                                device=self.coeff_cache.device)
         iter_size = 2048
         for i in range(0, bvr.shape[1], iter_size):
-            max_i = min(i + iter_size, self.coeff_sel_len)
+            max_i = min(i + iter_size, coeff_sel_len)
             bvr_i = bvr[:, i:max_i].to(torch.int64)
             bin_vec = ((bvr_i.unsqueeze(-1) & powers) != 0).to(torch.int32)
             bin_vec = bin_vec.view(self.num_sums, -1)
-            max_coeff_i = min(max_i*num_bits, self.coeff_sel_len)
+            max_coeff_i = min(max_i*num_bits, coeff_sel_len)
             bin_vec_trunc = bin_vec[:, :max_coeff_i].transpose(0, 1)
             coeff_sel_i = self._bin2dec(bin_vec_trunc, self.num_sums)
             coeff_sel[i*num_bits:max_coeff_i] = coeff_sel_i.view(-1)
@@ -460,15 +465,11 @@ class sbvr():
 
         l_bvr = self.bvr
         l_coeff_idx = self.coeff_idx # [num_cgroups]
-        l_bias_idx = self.bias_idx # [num_cgroups]
         l_coeff_cache = self.coeff_cache # [cache_lines, num_sums]
-        l_bias_cache = self.bias_cache # [cache_lines]
         
         r_bvr = rhs.bvr
         r_coeff_idx = rhs.coeff_idx # [num_cgroups]
-        r_bias_idx = rhs.bias_idx # [num_cgroups]
         r_coeff_cache = rhs.coeff_cache # [cache_lines, num_sums]
-        r_bias_cache = rhs.bias_cache # [cache_lines]
         
         return sbvr_mm(l_bvr,
                        l_coeff_idx,
@@ -496,26 +497,23 @@ def save_sbvr(sbvr_obj, filename):
     if not isinstance(sbvr_obj, sbvr):
         raise ValueError("The object is not a valid SBVR object.")
     save_dict = {
+        "num_sums": sbvr_obj.num_sums,
+        "bvr_num_bits": sbvr_obj.bvr_num_bits,
+        "cgroup_len": sbvr_obj.cgroup_len,
+        
+        "original_data_shape": sbvr_obj.original_data_shape,
         "padded_data_shape": sbvr_obj.padded_data_shape,
         "original_dtype": sbvr_obj.original_dtype,
-        "coeff_idx": sbvr_obj.coeff_idx,
-        "num_sums": sbvr_obj.num_sums,
-        "bvr": sbvr_obj.bvr,
-        "bvr_num_bits": sbvr_obj.bvr_num_bits,
-        "coeff_sel_len": sbvr_obj.coeff_sel_len,
-        "cgroup_len": sbvr_obj.cgroup_len,
-        "bias_idx": sbvr_obj.bias_idx,
-        "bias_cache": sbvr_obj.bias_cache,
-        "coeff_cache": sbvr_obj.coeff_cache,
-        "bin_combs": sbvr_obj.bin_combs,
-        "original_data_shape": sbvr_obj.original_data_shape,
         "bvr_dtype": sbvr_obj.bvr_dtype,
         "compute_dtype": sbvr_obj.compute_dtype,
+        
+        "coeff_cache": sbvr_obj.coeff_cache,
+        "coeff_idx": sbvr_obj.coeff_idx,
+        "bvr": sbvr_obj.bvr,
     }
     torch.save(save_dict, filename)
         
 def load_sbvr(filename) -> sbvr:
     save_dict = torch.load(filename)
     sbvr_obj = sbvr(load_only=True, **save_dict)
-    
     return sbvr_obj
