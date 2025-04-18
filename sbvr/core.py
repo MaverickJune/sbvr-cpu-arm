@@ -3,7 +3,7 @@ import itertools
 import math
 import copy
 from tqdm import tqdm
-from sbvr.sbvr_cuda import sbvr_mm
+from sbvr.sbvr_cuda import sbvr_mm_T
 
 def r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
@@ -18,7 +18,7 @@ class sbvr():
     def __init__(self, 
                  data: torch.Tensor = None, 
                  num_sums: int = 4,
-                 verbose_level: int = 1,
+                 verbose_level: int = 0,
                  cgroup_len: int = 128,
                  r_search_num = 64,
                  b_search_num = 40,
@@ -74,11 +74,10 @@ class sbvr():
         self.search_batch_size = int(total_mem * 0.8 / diff_mat_size)
         
         # Cache settings
-        self.cache_idx_dtype = torch.uint16
         self.cache_warmup_num = cache_warmup_num
-        elem_size = torch.tensor(0, dtype=self.cache_idx_dtype).element_size() 
-        self.coeff_cache = torch.zeros((2**(8*elem_size), num_sums),
-            dtype=self.compute_dtype, device=data.device)
+        self.coeff_cache = torch.zeros((2**16, num_sums), 
+                                       dtype=self.compute_dtype, 
+                                       device=data.device)
         self.mse_window_size = mse_window_size
         self.acceptable_mse = 10**-12
         self.mse_history = []
@@ -300,8 +299,9 @@ class sbvr():
                     y_str("\n\t\tCoeff: ") + str(new_coeff_str))
             if new_mse >= min_mse:
                 # If the new search space is NOT better than the cached one:
-                print(r_str("\t\tNo better coeff found: ") +
-                      f"{new_mse:.4e} >= {min_mse:.4e}")
+                if self.verbose_level > 0:
+                    print(r_str("\t\tNo better coeff found: ") +
+                          f"{new_mse:.4e} >= {min_mse:.4e}")
             else:
                 # If the new search space is better than the cached one:
                 # Cache the results
@@ -330,8 +330,7 @@ class sbvr():
         data_num = data.numel()
         num_cgroups = \
             (data_num + self.cgroup_len - 1) // self.cgroup_len
-        self.coeff_idx = torch.empty((num_cgroups), 
-                                    dtype=self.cache_idx_dtype, 
+        self.coeff_idx = torch.empty((num_cgroups), dtype=torch.uint16, 
                                     device=data.device)
         out_coeff_sel = torch.empty((data_num), dtype=torch.int32,
                                      device=data.device)
@@ -349,7 +348,9 @@ class sbvr():
             out_coeff_sel[group_start:group_end] = coeff_sel
         self.coeff_cache = \
             self.coeff_cache[:self.num_coeff_cache_lines].contiguous()
-
+        if self.num_coeff_cache_lines < 2**8:
+            self.coeff_idx = self.coeff_idx.to(torch.uint8)
+            
         return out_coeff_sel
             
     @torch.inference_mode()
@@ -365,7 +366,7 @@ class sbvr():
             
     @torch.inference_mode()
     def _change_coeff_sel_to_bvr(self, coeff_sel):
-        coeff_sel_len = self.original_data_shape.numel()
+        coeff_sel_len = self.padded_data_shape.numel()
         num_bits = self.bvr_num_bits
         padded_len = (coeff_sel_len + num_bits - 1) // num_bits * num_bits
         self.bvr = torch.zeros((self.num_sums, (padded_len // num_bits)),
@@ -394,7 +395,7 @@ class sbvr():
      
     @torch.inference_mode()
     def _change_bvr_to_coeff_sel(self):
-        coeff_sel_len = self.original_data_shape.numel()
+        coeff_sel_len = self.padded_data_shape.numel()
         bvr = self.bvr.transpose(0, 1).contiguous().view(self.num_sums, -1)
         num_bits = self.bvr_num_bits
         powers = 2 ** torch.arange(num_bits, 
@@ -440,61 +441,56 @@ class sbvr():
         
         return decoded_tensor
     
-    @torch.inference_mode()
-    def cuda_mat_mat_t_mul(self, rhs) -> torch.Tensor:
-        if not isinstance(rhs, sbvr):
-            raise ValueError(r_str("The RHS SBVR object is not valid."))
-        if len(self.original_data_shape) != 2:
-            raise ValueError(r_str("The LHS SBVR object is not a matrix."))
-        if len(rhs.original_data_shape) != 2:
-            raise ValueError(r_str("The RHS SBVR object is not a matrix."))
-        if self.cgroup_len != rhs.cgroup_len:
-            raise ValueError(r_str("Incompatible SBVR coeff group len: ") +
-                             f"LHS SBVR group length: {self.cgroup_len}, "
-                             f"RHS SBVR group length: {rhs.cgroup_len}")
-        if self.padded_data_shape[1] != rhs.padded_data_shape[1]:
-            raise ValueError(r_str("Incompatible matrix and vector shapes: ") +
-                             f"LHS SBVR shape: {self.original_data_shape}, "
-                             f"RHS SBVR shape: {rhs.original_data_shape}")
-        if self.compute_dtype != torch.float16 or \
-              rhs.compute_dtype != torch.float16:
-            raise ValueError(r_str("Incompatible SBVR compute data types: ") +
-                             f"LHS SBVR dtype: {self.compute_dtype}, "
-                             f"RHS SBVR dtype: {rhs.compute_dtype}")
-        if self.bvr_dtype != torch.uint32 or rhs.bvr_dtype != torch.uint32:
-            raise ValueError(r_str("Incompatible SBVR vector data types: ") +
-                             f"LHS BVR dtype: {self.bvr_dtype}, "
-                             f"RHS BVR dtype: {rhs.bvr_dtype}")
-
-        l_bvr = self.bvr
-        l_coeff_idx = self.coeff_idx # [num_cgroups]
-        l_coeff_cache = self.coeff_cache # [cache_lines, num_sums]
-        
-        r_bvr = rhs.bvr
-        r_coeff_idx = rhs.coeff_idx # [num_cgroups]
-        r_coeff_cache = rhs.coeff_cache # [cache_lines, num_sums]
-        
-        return sbvr_mm(l_bvr,
-                       l_coeff_idx,
-                       l_bias_idx,
-                       l_coeff_cache,
-                       l_bias_cache,
-                       r_bvr,
-                       r_coeff_idx,
-                       r_bias_idx,
-                       r_coeff_cache,
-                       r_bias_cache)
-
     def get_sbvr_info(self):
         info_str = b_str("SBVR Info:") + \
         y_str("\n\tOriginal Data Type: ") + str(self.original_dtype) + \
         y_str("\n\tOriginal Data Shape: ") + str(self.original_data_shape) + \
         y_str("\n\tNumber of Summations: ") + str(self.num_sums) + \
         y_str("\n\tCoefficient Group Size: ") + str(self.cgroup_len) + \
-        y_str("\n\tCoefficient Data Type: ") + str(self.coeff_dtype) + \
-        y_str("\n\tBinary Vector Data Type: ") + str(self.bvr_dtype) + \
-        y_str("\n\tCoefficient Tensor Size: ") + str(self.coeff.shape)
+        y_str("\n\tBinary Vector Data Type: ") + str(self.bvr_dtype)
+
         return info_str
+    
+@torch.inference_mode()
+def mm_T(lhs: sbvr, rhs: sbvr) -> torch.Tensor:
+    if not isinstance(lhs, sbvr) or not isinstance(rhs, sbvr):
+        raise ValueError(r_str("The SBVR object is not valid."))
+    if len(lhs.original_data_shape) != 2:
+        raise ValueError(r_str("The LHS SBVR object is not a matrix."))
+    if len(rhs.original_data_shape) != 2:
+        raise ValueError(r_str("The RHS SBVR object is not a matrix."))
+    if lhs.cgroup_len != rhs.cgroup_len:
+        raise ValueError(r_str("Incompatible SBVR coeff group len: ") +
+                            f"LHS SBVR group length: {lhs.cgroup_len}, "
+                            f"RHS SBVR group length: {rhs.cgroup_len}")
+    if lhs.padded_data_shape[1] != rhs.padded_data_shape[1]:
+        raise ValueError(r_str("Incompatible matrix and vector shapes: ") +
+                            f"LHS SBVR shape: {lhs.original_data_shape}, "
+                            f"RHS SBVR shape: {rhs.original_data_shape}")
+    if lhs.compute_dtype != torch.float16 or \
+            rhs.compute_dtype != torch.float16:
+        raise ValueError(r_str("Incompatible SBVR compute data types: ") +
+                            f"LHS SBVR dtype: {lhs.compute_dtype}, "
+                            f"RHS SBVR dtype: {rhs.compute_dtype}")
+    if lhs.bvr_dtype != torch.uint32 or rhs.bvr_dtype != torch.uint32:
+        raise ValueError(r_str("Incompatible SBVR vector data types: ") +
+                            f"LHS BVR dtype: {lhs.bvr_dtype}, "
+                            f"RHS BVR dtype: {rhs.bvr_dtype}")
+
+    l_bvr = lhs.bvr
+    l_coeff_idx = lhs.coeff_idx # [num_cgroups]
+    l_coeff_cache = lhs.coeff_cache # [cache_lines, num_sums]
+    
+    r_bvr = rhs.bvr
+    r_coeff_idx = rhs.coeff_idx # [num_cgroups]
+    r_coeff_cache = rhs.coeff_cache # [cache_lines, num_sums]
+    
+    return sbvr_mm_T(l_bvr,
+                     l_coeff_idx,
+                     l_coeff_cache,
+                     r_bvr,
+                     r_coeff_idx,
+                     r_coeff_cache)
     
 def save_sbvr(sbvr_obj, filename):
     '''
@@ -527,9 +523,13 @@ def load_sbvr(filename, device=None, verbose=0) -> sbvr:
     for k, v in save_dict.items():
         if isinstance(v, torch.Tensor):
             save_dict[k] = v.to(device)
-    save_dict["coeff_idx"] = save_dict["coeff_idx"].to(torch.uint16)
     save_dict["bvr"] = save_dict["bvr"].to(torch.uint32)
     
+    if save_dict["coeff_cache"].shape[0] < 2**8:
+        save_dict["coeff_cache"] = save_dict["coeff_cache"].to(torch.uint8)
+    else:
+        save_dict["coeff_cache"] = save_dict["coeff_cache"].to(torch.uint16)
+
     if verbose == 1:
         for k, v in save_dict.items():
             if not isinstance(v, torch.Tensor):
