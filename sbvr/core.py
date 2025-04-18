@@ -2,6 +2,7 @@ import torch
 import itertools
 import math
 import copy
+import numpy as np
 from tqdm import tqdm
 from sbvr.sbvr_cuda import sbvr_mm
 
@@ -28,15 +29,14 @@ class sbvr():
                  search_extend_ratio: float = 1.2,
                  compute_dtype: torch.dtype = torch.float16,
                  decode_only: bool = False,
-                 **kwargs):
+                 save_dict: dict = None):
         if decode_only:
-            def load_from_kwargs(self, **kwargs):
+            if save_dict is None:
+                raise ValueError(r_str("save_dict cannot be None"))
+            def load_from_kwargs(**kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
-            load_from_kwargs(self, **kwargs)
-            self.num_sums = num_sums
-            self.cgroup_len = cgroup_len
-            self.compute_dtype = compute_dtype
+            load_from_kwargs(**save_dict)
             return
         
         if data is None:
@@ -495,7 +495,27 @@ class sbvr():
         y_str("\n\tBinary Vector Data Type: ") + str(self.bvr_dtype) + \
         y_str("\n\tCoefficient Tensor Size: ") + str(self.coeff.shape)
         return info_str
+
+def serialize_tensor(tensor: torch.Tensor) -> bytes:
+    return {
+        "data": tensor.cpu().numpy().tobytes(),
+        "shape": tensor.shape,
+        "dtype": tensor.dtype
+    }
     
+def deserialize_tensor(serialized_tensor: bytes) -> torch.Tensor:
+    dtype_map = {
+        "torch.uint16": np.uint16,
+        "torch.uint32": np.uint32,
+    }
+    dtype_str = str(serialized_tensor["dtype"])
+    np_dtype = dtype_map.get(dtype_str, None)
+    if np_dtype is None:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
+    shape = serialized_tensor["shape"]
+    array = np.frombuffer(serialized_tensor["data"], dtype=np_dtype).reshape(shape)
+    return torch.from_numpy(array).to(serialized_tensor["dtype"])
+
 def save_sbvr(sbvr_obj, filename):
     '''
     Some dtypes(uint16, 32) cannot be pickled for torch.save, so we need to convert them
@@ -515,25 +535,31 @@ def save_sbvr(sbvr_obj, filename):
         "compute_dtype": sbvr_obj.compute_dtype,
         
         "coeff_cache": sbvr_obj.coeff_cache,
-        "coeff_idx": sbvr_obj.coeff_idx.to(torch.int32),
-        "bvr": sbvr_obj.bvr.to(torch.int64),
+        "coeff_idx": serialize_tensor(sbvr_obj.coeff_idx),
+        "bvr": serialize_tensor(sbvr_obj.bvr)
     }
     torch.save(save_dict, filename)
 
-def load_sbvr(filename, device=None, verbose=0) -> sbvr:
+def load_sbvr(filename, device=None, verbose=0, legacy=False) -> sbvr:
     if device is None:
         raise ValueError("Device cannot be None")
     save_dict = torch.load(filename)
     for k, v in save_dict.items():
         if isinstance(v, torch.Tensor):
             save_dict[k] = v.to(device)
-    save_dict["coeff_idx"] = save_dict["coeff_idx"].to(torch.uint16)
-    save_dict["bvr"] = save_dict["bvr"].to(torch.uint32)
+    if isinstance(save_dict["coeff_idx"], torch.Tensor) or isinstance(save_dict["bvr"], torch.Tensor):
+        legacy=True
+    if not legacy:
+        save_dict["coeff_idx"] = deserialize_tensor(save_dict["coeff_idx"]).to(device)
+        save_dict["bvr"] = deserialize_tensor(save_dict["bvr"]).to(device)
+    else:
+        save_dict["coeff_idx"] = save_dict["coeff_idx"].to(torch.uint16)
+        save_dict["bvr"] = save_dict["bvr"].to(torch.uint32)
     
     if verbose == 1:
         for k, v in save_dict.items():
             if not isinstance(v, torch.Tensor):
                 print(f"{k}: {v}")
     
-    sbvr_obj = sbvr(decode_only=True, **save_dict)
+    sbvr_obj = sbvr(decode_only=True, save_dict=save_dict)
     return sbvr_obj

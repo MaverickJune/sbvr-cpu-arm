@@ -141,7 +141,7 @@ def sbvr_store_and_load_test(mat_len=512, sbvr_max_sums=6):
     sbvr_matrix = sbvr.sbvr(target_matrix, num_sums=sbvr_max_sums)
     sbvr.save_sbvr(sbvr_matrix, f"sbvr_matrix_{mat_len}.pt")
     load_sbvr_matrix = sbvr.load_sbvr(f"sbvr_matrix_{mat_len}.pt", device=device)
-    target_matrix_decoded = sbvr_matrix.decode()
+    target_matrix_decoded = load_sbvr_matrix.decode()
     
     print_errors(target_matrix, target_matrix_decoded)
     
