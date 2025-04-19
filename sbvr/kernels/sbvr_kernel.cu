@@ -11,6 +11,7 @@ __global__ void naive_cuda_sbvr_mm_T(
     uint32_t* r_bvr,
     uint8_t* r_coeff_idx,
     __half* r_coeff_cache,
+    __half* bias,
     __half* out,
     int out_rows,
     int out_cols,
@@ -40,15 +41,16 @@ __global__ void naive_cuda_sbvr_mm_T(
         int col = i % out_cols;
 
         // Initialize output
-        float sum = 0.0f;
+        float sum = (bias != nullptr) ? __half2float(bias[col]) : 0.0f;
 
         // if (tid == 0)
-        //     printf("row: %d, col: %d, out_rows: %d, out_cols: %d, "
+        //     printf("Tid %d (%d, %d), bias: %f, out_rows: %d, out_cols: %d, "
         //         "l_num_sums: %d, r_num_sums: %d, l_cache_size: %d, "
         //         "r_cache_size: %d, cgroup_per_inner_vec: %d, "
         //         "bvr_per_cgroup: %d\n",
-        //         row, col, out_rows, out_cols, l_num_sums, r_num_sums,
-        //         l_cache_size, r_cache_size, cgroup_per_inner_vec,
+        //         tid, row, col, sum, out_rows, out_cols, 
+        //         l_num_sums, r_num_sums, l_cache_size, 
+        //         r_cache_size, cgroup_per_inner_vec,
         //         bvr_per_cgroup);
 
         for (int cg_idx = 0; cg_idx < cgroup_per_inner_vec; cg_idx++)
@@ -145,6 +147,7 @@ extern "C" void launch_cuda_sbvr_mm_T(
                     uint32_t* r_bvr,
                     uint8_t* r_coeff_idx,
                     __half* r_coeff_cache,
+                    __half* bias,
                     __half* out,
                     int out_rows,
                     int out_cols,
@@ -166,6 +169,7 @@ extern "C" void launch_cuda_sbvr_mm_T(
         r_bvr,
         r_coeff_idx,
         r_coeff_cache,
+        bias,
         out,
         out_rows,
         out_cols,

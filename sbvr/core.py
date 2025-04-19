@@ -100,6 +100,8 @@ class sbvr():
             
         self.padded_data_shape = data_padded.shape
         
+        self.dummy_bias = torch.tensor([0], dtype=self.compute_dtype,
+                                       device=data.device)
         self.bvr = None
         self._change_coeff_sel_to_bvr(self._encode_to_sbvr(data_padded))
         
@@ -452,7 +454,7 @@ class sbvr():
         return info_str
 
 @torch.inference_mode()
-def mm_T(lhs: sbvr, rhs: sbvr) -> torch.Tensor:
+def mm_T(lhs: sbvr, rhs: sbvr, bias: torch.Tensor = None) -> torch.Tensor:
     if not isinstance(lhs, sbvr) or not isinstance(rhs, sbvr):
         raise ValueError(r_str("The SBVR object is not valid."))
     if len(lhs.original_data_shape) != 2:
@@ -476,6 +478,9 @@ def mm_T(lhs: sbvr, rhs: sbvr) -> torch.Tensor:
         raise ValueError(r_str("Incompatible SBVR vector data types: ") +
                             f"LHS BVR dtype: {lhs.bvr_dtype}, "
                             f"RHS BVR dtype: {rhs.bvr_dtype}")
+    if bias is not None and bias.shape != (rhs.padded_data_shape.shape[0],):
+        raise ValueError("Bias must be a 1D tensor with same outer dim as rhs")
+
 
     l_bvr = lhs.bvr
     l_coeff_idx = lhs.coeff_idx # [num_cgroups]
@@ -485,12 +490,16 @@ def mm_T(lhs: sbvr, rhs: sbvr) -> torch.Tensor:
     r_coeff_idx = rhs.coeff_idx # [num_cgroups]
     r_coeff_cache = rhs.coeff_cache # [cache_lines, num_sums]
     
+    if bias is None:
+        bias = lhs.dummy_bias
+    
     return sbvr_mm_T(l_bvr,
                      l_coeff_idx,
                      l_coeff_cache,
                      r_bvr,
                      r_coeff_idx,
-                     r_coeff_cache)
+                     r_coeff_cache,
+                     bias)
     
 def serialize_tensor(tensor: torch.Tensor) -> bytes:
     return {
@@ -501,6 +510,7 @@ def serialize_tensor(tensor: torch.Tensor) -> bytes:
     
 def deserialize_tensor(serialized_tensor: bytes) -> torch.Tensor:
     dtype_map = {
+        "torch.uint8": np.uint8,
         "torch.uint16": np.uint16,
         "torch.uint32": np.uint32,
     }
@@ -509,13 +519,14 @@ def deserialize_tensor(serialized_tensor: bytes) -> torch.Tensor:
     if np_dtype is None:
         raise ValueError(f"Unsupported dtype: {dtype_str}")
     shape = serialized_tensor["shape"]
-    array = np.frombuffer(serialized_tensor["data"], dtype=np_dtype).reshape(shape)
+    array = \
+        np.frombuffer(serialized_tensor["data"], dtype=np_dtype).reshape(shape)
     return torch.from_numpy(array).to(serialized_tensor["dtype"])
 
 def save_sbvr(sbvr_obj, filename):
     '''
-    Some dtypes(uint16, 32) cannot be pickled for torch.save, so we need to convert them
-    to a compatible dtype before saving
+    Some dtypes(uint16, 32) cannot be pickled for torch.save, 
+    so we need to convert them to a compatible dtype before saving
     '''
     if not isinstance(sbvr_obj, sbvr):
         raise ValueError("The object is not a valid SBVR object.")
@@ -543,10 +554,12 @@ def load_sbvr(filename, device=None, verbose=0, legacy=False) -> sbvr:
     for k, v in save_dict.items():
         if isinstance(v, torch.Tensor):
             save_dict[k] = v.to(device)
-    if isinstance(save_dict["coeff_idx"], torch.Tensor) or isinstance(save_dict["bvr"], torch.Tensor):
+    if isinstance(save_dict["coeff_idx"], torch.Tensor) or \
+        isinstance(save_dict["bvr"], torch.Tensor):
         legacy=True
     if not legacy:
-        save_dict["coeff_idx"] = deserialize_tensor(save_dict["coeff_idx"]).to(device)
+        save_dict["coeff_idx"] = \
+            deserialize_tensor(save_dict["coeff_idx"]).to(device)
         save_dict["bvr"] = deserialize_tensor(save_dict["bvr"]).to(device)
     else:
             save_dict["bvr"] = save_dict["bvr"].to(torch.uint32)
