@@ -7,6 +7,7 @@ result.txt
 dummy/
 build/
 dist/
+data/
 *.egg-info/
 *.txt
 *.pt

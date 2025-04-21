@@ -165,7 +165,7 @@ def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6,
         torch.save(mat_b, mat_b_out_path)
     else:
         mat_b = torch.load(mat_b_out_path).to(device)
-    bias = torch.randn((mat_len,), dtype=torch.float16, device=device)*0.3
+    bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
     mat_mat_ab = mat_a @ mat_b.T + bias
     if do_print:
         print_tensor(mat_a, "mat_a")
@@ -281,6 +281,7 @@ if __name__ == "__main__":
     sbvr_max_sums = sys.argv[2]
     
     # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    os.system(f"rm -rf {out_dir}")

@@ -7,21 +7,13 @@
 
 // Declare the kernel launcher (templated in the actual .cu file)
 void launch_cuda_sbvr_mm_T(
-    uint32_t* l_bvr,
-    void* l_coeff_idx,
-    __half* l_coeff_cache,
-    uint32_t* r_bvr,
-    void* r_coeff_idx,
-    __half* r_coeff_cache,
+    uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
+    uint32_t* r_bvr, void* r_coeff_idx,__half* r_coeff_cache,
     __half* bias,
     __half* out,
-    int out_rows,
-    int out_cols,
-    int l_num_sums,
-    int r_num_sums,
-    int l_cache_size,
-    int r_cache_size,
-    int cgroup_per_inner_vec);
+    int M, int N, int K,
+    int l_num_sums, int r_num_sums,
+    int l_cache_size, int r_cache_size);
 
 // PyTorch wrapper
 torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
@@ -32,17 +24,16 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
                         torch::Tensor r_coeff_cache,
                         c10::optional<torch::Tensor> bias_opt)
 {
-    int out_rows = l_bvr.size(0) * 4;
-    int out_cols = r_bvr.size(0) * 4;
-    int l_num_sums = l_bvr.size(1);
-    int r_num_sums = r_bvr.size(1);
+    int M = l_bvr.size(2);
+    int N = r_bvr.size(2);
+    int K = l_bvr.size(1);
+    assert (l_bvr.size(1) == r_bvr.size(1));
+    int l_num_sums = l_bvr.size(0);
+    int r_num_sums = r_bvr.size(0);
     int l_cache_size = l_coeff_cache.size(0);
     int r_cache_size = r_coeff_cache.size(0);
-    int cgroup_per_inner_vec = l_bvr.size(2);
-    int bvr_per_cgroup = l_bvr.size(3);
-    assert (bvr_per_cgroup == 4);
 
-    auto out = torch::empty({out_rows, out_cols},
+    auto out = torch::empty({M, N},
                          torch::dtype(torch::kFloat16).device(l_bvr.device()));
 
     // Handle optional bias
@@ -61,13 +52,9 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
         reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
         bias_ptr,
         reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
-        out_rows,
-        out_cols,
-        l_num_sums,
-        r_num_sums,
-        l_cache_size,
-        r_cache_size,
-        cgroup_per_inner_vec);
+        M, N, K,
+        l_num_sums, r_num_sums,
+        l_cache_size, r_cache_size);
 
     return out;
 }
