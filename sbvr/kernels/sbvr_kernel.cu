@@ -320,17 +320,17 @@ void launch_naive_sbvr_kernel(
     int blocks = cuda_prop.multiProcessorCount * 8;
     dim3 threads = 32;
 
-    std::cout << "Launching naive SBVR kernel <" 
-              << typeid(LIndexT).name() << ", " 
-              << typeid(RIndexT).name() << ", "
-              << "l_num_sums: " << l_num_sums << ", "
-              << "r_num_sums: " << r_num_sums << ", "
-              << "M: " << M << ", "
-              << "N: " << N << ", "
-              << "K: " << K << ", "
-              << "blocks: " << blocks << ", " 
-              << "threads: (" << threads.x << ", " 
-              << threads.y << ", " << threads.z << ")" << std::endl;
+    // std::cout << "Launching naive SBVR kernel <" 
+    //           << typeid(LIndexT).name() << ", " 
+    //           << typeid(RIndexT).name() << ", "
+    //           << "l_num_sums: " << l_num_sums << ", "
+    //           << "r_num_sums: " << r_num_sums << ", "
+    //           << "M: " << M << ", "
+    //           << "N: " << N << ", "
+    //           << "K: " << K << ", "
+    //           << "blocks: " << blocks << ", " 
+    //           << "threads: (" << threads.x << ", " 
+    //           << threads.y << ", " << threads.z << ")" << std::endl;
 
 
     cuda_naive_sbvr_mm_T<LIndexT, RIndexT><<<blocks, threads>>>(
