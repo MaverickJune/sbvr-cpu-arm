@@ -3,7 +3,8 @@ from sbvr_utils.utils_llama import get_llama
 
 
 def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=False, 
-                      use_gptq_4=False, use_awq_4=False, weight_path=None):
+                      use_gptq_4=False, use_awq_4=False, gptq_local_model_path:str = None,
+                      weight_path=None):
     if not model_path:
         raise ValueError("model_path  cannot be None")
     
@@ -14,7 +15,7 @@ def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=Fa
     elif use_fp8:
         model, tokenizer = get_llama(model_path=model_path, device_map="cuda:0", use_fp8=True)
     elif use_gptq_4:
-        model, tokenizer = get_llama(model_path=model_path, device_map="cuda:0", use_gptq_4=True)
+        model, tokenizer = get_llama(model_path=model_path, device_map="cuda:0", use_gptq_4=True, load_from_local=True, gptq_local_model_path=gptq_local_model_path)
     elif use_awq_4:
         model, tokenizer = get_llama(model_path=model_path, device_map="cuda:0", use_awq_4=True)
     else:
@@ -25,11 +26,12 @@ def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=Fa
 if __name__ == "__main__":
     MODEL_PATH = "meta-llama/Llama-3.2-1B"
     WEIGHT_PATH = "/home/nxclab/wonjun/bvq/compressed_weights"
+    GPTQ_LOCAL_MODEL_PATH = "/home/nxclab/wonjun/bvq/Llama-3.2-1B-gptq-4bit"
     
     # measure_llama_ppl(model_path=MODEL_PATH)
     # measure_llama_ppl(model_path=MODEL_PATH, use_llm_int8=True)
-    # measure_llama_ppl(model_path=MODEL_PATH, use_gptq_4=True)
-    measure_llama_ppl(model_path=MODEL_PATH, use_awq_4=True)
+    measure_llama_ppl(model_path=MODEL_PATH, use_gptq_4=True, gptq_local_model_path=GPTQ_LOCAL_MODEL_PATH)
+    # measure_llama_ppl(model_path=MODEL_PATH, use_awq_4=True)
     # measure_llama_ppl(model_path=MODEL_PATH, use_sbvr=True, weight_path=WEIGHT_PATH)
 
     
