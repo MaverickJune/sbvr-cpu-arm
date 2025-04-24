@@ -18,7 +18,8 @@ def decompress_sbvr_llama(weight_path=None, model=None):
 @torch.no_grad()
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
               device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False,
-              use_gptq_4:bool = False, use_awq_4:bool = False, weight_path:str = None):
+              use_gptq_4:bool = False, use_awq_4:bool = False, load_from_local:bool = False, gptq_local_model_path:str = None,
+              weight_path:str = None):
     r'''
     Fetch llama model from huggingfaces
 
@@ -62,23 +63,33 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
         )
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     elif use_gptq_4:
-        from gptqmodel import GPTQModel
+        from transformers import GPTQConfig
         logger.info("Using Llama model with GPTQ 4-bit")
-        allowed_models = [("Llama-3.2-1B", "ModelCloud/Llama-3.2-1B-gptqmodel-ci-4bit"), 
-                          ("Llama-3.1-8B", "ModelCloud/Meta-Llama-3.1-8B-gptq-4bit")]
-        flag = False
-        quantized_model_name = ""
-        for item in allowed_models:
-            if item[0] in model_path:
-                flag = True
-                quantized_model_name = item[1]
-                break
-        if not flag:
-            raise ValueError(f"Model {model_path} is not supported for GPTQ 4-bit. Supported models: {allowed_models}")
-        # model = GPTQModel.from_quantized(quantized_model_name, device="cuda:0")
-        model = GPTQModel.load(quantized_model_name, device="cuda:0")
-        tokenizer = model.tokenizer
+        
+        if not load_from_local:
+            logger.info("Start quantizing to GPTQ model ...")
+            tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+            gptq_config = GPTQConfig(bits=4, dataset="c4", tokenizer=tokenizer)
+            model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device_map, quantization_config=gptq_config)
+            
+            model.to(device_map)
+            model_path = model_path.replace("meta-llama/", "")
+            model.save_pretrained(f"{model_path}-gptq-4bit")
+            tokenizer.save_pretrained(f"{model_path}-gptq-4bit")
+            logger.info("Finish quantizing GPTQ model")
+            logger.info(f"Saved it to the local path: {model_path}-gptq-4bit")
+        else:
+            if gptq_local_model_path is None:
+                raise ValueError("local_model_path cannot be None when load_from_local is True")
+            logger.info("Loading local GPTQ model...")
+            tokenizer = AutoTokenizer.from_pretrained(f"{gptq_local_model_path}")
+            model = AutoModelForCausalLM.from_pretrained(f"{gptq_local_model_path}", device_map=device_map)
+            logger.info("Finish loading local GPTQ model")
+            
     elif use_awq_4:
+        from transformers import __version__ as transformers_version
+        if not transformers_version == "4.47.1":
+            raise ValueError("AWQ 4-bit quantization only works with transformers version 4.47.1")
         logger.info("Using Llama model with AWQ 4-bit")
         allowed_models = [("Llama-3.2-1B", "joshmiller656/Llama3.2-1B-AWQ-INT4"), 
                           ("Llama-3.1-8B", "solidrust/Hermes-3-Llama-3.1-8B-AWQ")]
