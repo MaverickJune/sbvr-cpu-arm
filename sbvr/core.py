@@ -766,12 +766,12 @@ def mm_T(lhs: sbvr, rhs: sbvr, bias: torch.Tensor = None) -> torch.Tensor:
                      r_coeff_cache,
                      bias)[:out_shape[0], :out_shape[1]].contiguous()
 
-def load(filename, device=None, verbose=1) -> sbvr:
+def load(filename, device=None, verbose_level=1) -> sbvr:
     serialized_sbvr = torch.load(filename)
     sbvr_obj = sbvr(sbvr_serialized=serialized_sbvr, 
-                    verbose_level=verbose, device=device)
-    sbvr_obj.verbose_level = verbose
-    if verbose > 0:
+                    verbose_level=verbose_level, device=device)
+    sbvr_obj.verbose_level = verbose_level
+    if verbose_level > 0:
         print(_b_str("Loaded SBVR object from: ") + filename)
         print(sbvr_obj.get_sbvr_info())
     return sbvr_obj
