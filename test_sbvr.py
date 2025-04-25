@@ -165,7 +165,15 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
                                     num_sums, verbose_level=0)
     mat_b_sbvr = load_or_create_sbvr("matrix_b", (mat_len, mat_len), device,
                                     num_sums, verbose_level=0)
+    
+    torch.cuda.profiler.cudart().cudaProfilerStart()
+    torch.cuda.nvtx.range_push("PyTorch CUDA MatMul")
     sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
+    sbvr_cuda_mat_mat_ab = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.profiler.cudart().cudaProfilerStop()
     
     if do_print:
         print_tensor(mat_a_sbvr.bvr, "mat_a_sbvr.bvr")
@@ -178,11 +186,6 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
         print_tensor(mat_b_sbvr.decode(), "mat_b_sbvr")
         print_tensor(mat_b_sbvr.decode().T, "mat_b_sbvr_T")
         print_tensor(sbvr_decoded_mat_mat_ab, "sbvr_decoded_mat_mat_ab")
-    
-    torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
-    sbvr_cuda_mat_mat_ab = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
-    torch.cuda.nvtx.range_pop()
-    if do_print:
         print_tensor(sbvr_cuda_mat_mat_ab, "sbvr_cuda_mat_mat_ab")
         
     print(b_str("Case 1: SBVR decoded Matmul vs SBVR CUDA Matmul"))
@@ -216,10 +219,14 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b_size, device, i,
                                         verbose_level=1)
         for _ in range(5):
-            f16_matmul = mat_a @ mat_b.T + bias
+            sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
         time_start = time.time()
         for _ in range(num_runs):
-            sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
+            # torch.cuda.profiler.cudart().cudaProfilerStart()
+            # torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
+            a = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
+            # torch.cuda.nvtx.range_pop()
+            # torch.cuda.profiler.cudart().cudaProfilerStop()
         sbvr_time[i] = (time.time() - time_start) / num_runs
         sbvr_dict[i] = sbvr_matmul
 
@@ -227,9 +234,11 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
           y_str("Matrix B Size: ") + str(mat_b_size))
     for i, (key, value) in enumerate(sbvr_dict.items()):
         print(b_str(f"Case {i+1}: f16 matmul vs SBVR {key} bits"))
-        print_errors(f16_matmul, value)
-        print(y_str("\tMatmul time taken: ") + f"{sbvr_time[key]:.8f} secs "
-                     + y_str("vs ") + f"{f16_time:.8f} secs")
+        if value is not None:
+            print_errors(f16_matmul, value)
+        print(y_str("\tMatmul time taken: ") 
+              + f"{sbvr_time[key]*10e6:.4f} usecs"
+              + y_str(" vs ") + f"{f16_time*10e6:.4f} usecs")
         print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time[key]:.4f}x")
 
 if __name__ == "__main__":

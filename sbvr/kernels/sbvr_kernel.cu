@@ -4,7 +4,9 @@
 #include <iostream>
 #include <cstdint>
 
-#define K_PER_BVR 8
+#define T_BLOCK_PER_SM 8
+#define K_PER_BVR 8 // BVR size 256
+#define _1xtN_TILE_N_SIZE 8
 #define THREAD_PER_WARP 32
 #define T_BLOCK_TILE_SIZE 32
 
@@ -134,7 +136,7 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
 
 template <typename LIndexT, typename RIndexT, int L_NUM_SUMS, int R_NUM_SUMS,
           int TILE_N>
-__global__ void cuda_1xtN_sbvr_mm_T(
+__global__ __launch_bounds__(32, 8) void cuda_1xtN_sbvr_mm_T(
     uint32_t* l_bvr, LIndexT* l_coeff_idx, __half* __restrict__ l_coeff_cache,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
     __half* __restrict__ bias, __half* __restrict__ out,
@@ -206,73 +208,80 @@ __global__ void cuda_1xtN_sbvr_mm_T(
             }
 
             #pragma unroll
-            for (int k = 0; k < K_PER_BVR; k++)
+            for (int k = 0; k < K_PER_BVR/4; k++)
             {
-                const int k_idx = bvr_idx * K_PER_BVR + k;   
-                int2 l_bvr_list[L_NUM_SUMS / 2];
-                // l_bvr: [L_NUM_SUMS/2, K, M, 2]
-                const int2* l_bvr_ptr = (int2*)&l_bvr[(k_idx * M + m) * 2];
+                int2 l_bvr_list[L_NUM_SUMS / 2][4];
+                int2 r_bvr_list[R_NUM_SUMS / 2][4];
                 #pragma unroll
-                for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
-                    l_bvr_list[l_idx] = l_bvr_ptr[l_idx * K * M];
-                int2 r_bvr_list[R_NUM_SUMS / 2];
-                // r_bvr: [R_NUM_SUMS/2, K, N, 2]
-                const int2* r_bvr_ptr = (int2*)&r_bvr[(k_idx * N + n) * 2];
-                #pragma unroll
-                for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
-                    r_bvr_list[r_idx] = r_bvr_ptr[r_idx * K * N];
-
-                #pragma unroll
-                for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
+                for (int kk = 0; kk < 4; kk++)
                 {
-                    const int2 l_0_1 = l_bvr_list[l_idx];
+                    const int k_idx = bvr_idx * K_PER_BVR + k * 4 + kk;   
+                    // l_bvr: [L_NUM_SUMS/2, K, M, 2]
+                    const int2*  l_bvr_ptr = (int2*)&l_bvr[(k_idx * M + m) * 2];
+                    #pragma unroll
+                    for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
+                        l_bvr_list[l_idx][kk] = l_bvr_ptr[l_idx * K * M];
+                    // r_bvr: [R_NUM_SUMS/2, K, N, 2]
+                    const int2* r_bvr_ptr = (int2*)&r_bvr[(k_idx * N + n) * 2];
                     #pragma unroll
                     for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
+                        r_bvr_list[r_idx][kk] = r_bvr_ptr[r_idx * K * N];
+                }
+                #pragma unroll
+                for (int kk = 0; kk < 4; kk++)
+                {
+                    #pragma unroll
+                    for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
                     {
-                        const int2 r_0_1 = r_bvr_list[r_idx];
-                        const __half2 lr_00_11 = 
-                            __halves2half2(
-                                __float2half(
-                                    (float)(__popc(((uint32_t)(l_0_1.x)) & 
-                                                   ((uint32_t)(r_0_1.x))))), 
-                                __float2half(
-                                    (float)(__popc(((uint32_t)(l_0_1.y)) & 
-                                                   ((uint32_t)(r_0_1.y))))));
-                        const __half2 lr_01_10 = 
-                            __halves2half2(
-                                __float2half(
-                                    (float)(__popc(((uint32_t)(l_0_1.x)) & 
-                                                   ((uint32_t)(r_0_1.y))))), 
-                                __float2half(
-                                    (float)(__popc(((uint32_t)(l_0_1.y)) & 
-                                                   ((uint32_t)(r_0_1.x))))));
-                        sum = __hfma2(lr_00_11, 
-                                        coeff_mult[l_idx][r_idx * 2], sum);
-                        sum = __hfma2(lr_01_10, 
-                                        coeff_mult[l_idx][r_idx * 2 + 1], sum);
-                        // if (g_tid == 0)
-                        //     printf("bvr_idx: %d, kidx: %d, l_idx: %d, "
-                        //            "r_idx: %d, l_0_1: (%d, %d), "
-                        //            "r_0_1: (%d, %d), lr_00_11: (%f, %f), "
-                        //            "lr_01_10: (%f, %f), co_mul_00_11: (%f, %f), "
-                        //            "co_mul_01_10: (%f, %f), sum: (%f, %f)\n",
-                        //            bvr_idx, k_idx, l_idx, r_idx,
-                        //            l_0_1.x, l_0_1.y,
-                        //            r_0_1.x, r_0_1.y,
-                        //            __half2float(lr_00_11.x), 
-                        //            __half2float(lr_00_11.y),
-                        //            __half2float(lr_01_10.x), 
-                        //            __half2float(lr_01_10.y),
-                        //            __half2float(
-                        //                     coeff_mult[l_idx][r_idx * 2].x),
-                        //            __half2float(
-                        //                     coeff_mult[l_idx][r_idx * 2].y),
-                        //            __half2float(
-                        //                     coeff_mult[l_idx][r_idx * 2 + 1].x),
-                        //            __half2float(
-                        //                     coeff_mult[l_idx][r_idx * 2 + 1].y),
-                        //            __half2float(sum.x), 
-                        //            __half2float(sum.y));
+                        const int2 l_0_1 = l_bvr_list[l_idx][kk];
+                        #pragma unroll
+                        for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
+                        {
+                            const int2 r_0_1 = r_bvr_list[r_idx][kk];
+                            const __half2 lr_00_11 = 
+                                __halves2half2(
+                                    __float2half(
+                                        (float)(__popc(((uint32_t)(l_0_1.x)) & 
+                                                    ((uint32_t)(r_0_1.x))))), 
+                                    __float2half(
+                                        (float)(__popc(((uint32_t)(l_0_1.y)) & 
+                                                    ((uint32_t)(r_0_1.y))))));
+                            const __half2 lr_01_10 = 
+                                __halves2half2(
+                                    __float2half(
+                                        (float)(__popc(((uint32_t)(l_0_1.x)) & 
+                                                    ((uint32_t)(r_0_1.y))))), 
+                                    __float2half(
+                                        (float)(__popc(((uint32_t)(l_0_1.y)) & 
+                                                    ((uint32_t)(r_0_1.x))))));
+                            sum = __hfma2(lr_00_11, 
+                                            coeff_mult[l_idx][r_idx * 2], sum);
+                            sum = __hfma2(lr_01_10, 
+                                            coeff_mult[l_idx][r_idx * 2 + 1], sum);
+                            // if (g_tid == 0)
+                            //     printf("bvr_idx: %d, kidx: %d, l_idx: %d, "
+                            //            "r_idx: %d, l_0_1: (%d, %d), "
+                            //            "r_0_1: (%d, %d), lr_00_11: (%f, %f), "
+                            //            "lr_01_10: (%f, %f), co_mul_00_11: (%f, %f), "
+                            //            "co_mul_01_10: (%f, %f), sum: (%f, %f)\n",
+                            //            bvr_idx, k_idx, l_idx, r_idx,
+                            //            l_0_1.x, l_0_1.y,
+                            //            r_0_1.x, r_0_1.y,
+                            //            __half2float(lr_00_11.x), 
+                            //            __half2float(lr_00_11.y),
+                            //            __half2float(lr_01_10.x), 
+                            //            __half2float(lr_01_10.y),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2].x),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2].y),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2 + 1].x),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2 + 1].y),
+                            //            __half2float(sum.x), 
+                            //            __half2float(sum.y));
+                        }
                     }
                 }
             }
@@ -280,6 +289,7 @@ __global__ void cuda_1xtN_sbvr_mm_T(
         // printf("\tgTid %d) tblock_id: %d, m: %d, n: %d, sum: (%f, %f)\n", 
         //             g_tid, tblock_id, m, n, __half2float(sum.x), 
         //             __half2float(sum.y));
+        __half bias_val = (bias != nullptr ? bias[n] : __float2half(0.0f));
         // Reduce the sum across blockDim.y
         #pragma unroll
         for (int i = (THREAD_PER_WARP / TILE_N) / 2; i > 0; i /= 2)
@@ -298,8 +308,7 @@ __global__ void cuda_1xtN_sbvr_mm_T(
         if (threadIdx.y == 0)
         {
             sum.x = __hadd(sum.x, sum.y);  
-            sum.x = __hadd(sum.x, 
-                           (bias != nullptr ? bias[n] : __float2half(0.0f))); 
+            sum.x = __hadd(sum.x, bias_val); 
             out[m * N + n] = sum.x; 
             // if (g_tid == 0)
             //     printf("\tgTid %d) tblock_id: %d, m: %d, n: %d, sum: %f\n", 
@@ -317,7 +326,7 @@ void launch_naive_sbvr_kernel(
     int M, int N, int K,
     int l_num_sums, int r_num_sums)
 {
-    int blocks = cuda_prop.multiProcessorCount * 8;
+    int blocks = cuda_prop.multiProcessorCount * T_BLOCK_PER_SM;
     dim3 threads = 32;
 
     // std::cout << "Launching naive SBVR kernel <" 
@@ -356,7 +365,7 @@ void launch_tMxtN_sbvr_kernel(
     int M, int N, int K)
 {
     int blocks = 4;
-    // int blocks = cuda_prop.multiProcessorCount * 8;
+    // int blocks = cuda_prop.multiProcessorCount * T_BLOCK_PER_SM;
     dim3 threads = {T_BLOCK_TILE_SIZE / TILE_M, 
                     T_BLOCK_TILE_SIZE / TILE_N, 1};
 
@@ -444,7 +453,7 @@ void launch_1xtN_sbvr_kernel(
     int M, int N, int K)
 {
     // int blocks = 1;
-    int blocks = cuda_prop.multiProcessorCount * 8;
+    int blocks = cuda_prop.multiProcessorCount * T_BLOCK_PER_SM;
     dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N};
 
     // std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
@@ -483,38 +492,33 @@ void launch_1xtN_sbvr_kernel_wrapper(
 {
     KernelLaunchFn kernel_list[] = {
         // <LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, TILE_N>
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 2, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 4, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 6, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 8, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 10, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 2, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 4, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 6, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 8, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 10, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 2, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 4, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 6, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 8, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 10, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 2, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 4, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 6, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 8, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 10, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 2, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 4, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 6, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 8, 4>,
-        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 10, 4>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 2, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 4, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 6, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 8, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 2, 10, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 2, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 4, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 6, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 8, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 4, 10, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 2, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 4, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 6, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 8, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 6, 10, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 2, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 4, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 6, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 8, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 8, 10, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 2, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 4, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 6, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 8, _1xtN_TILE_N_SIZE>,
+        launch_1xtN_sbvr_kernel<LIndexT, RIndexT, 10, 10, _1xtN_TILE_N_SIZE>,
     };
     int kernel_idx = (l_num_sums - 2)/2 * 5 + (r_num_sums - 2)/2;
-    if (kernel_idx < 0 || kernel_idx > 25)
-    {
-        std::cerr << "Invalid kernel index: " << kernel_idx << std::endl;
-        throw std::runtime_error("Invalid kernel index");
-    }
     kernel_list[kernel_idx](
            l_bvr, l_coeff_idx, l_coeff_cache,
            r_bvr, r_coeff_idx, r_coeff_cache,

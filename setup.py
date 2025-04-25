@@ -16,7 +16,11 @@ setup(
             ],
             extra_compile_args={
                 'cxx': ['-O3'],
-                'nvcc': ['-O3']
+                'nvcc': ['-O3',
+                         '--maxrregcount=128',
+                         '--use_fast_math',
+                         '--ftz=true',
+                         '-Xptxas="-v"']
             },
         ),
     ],

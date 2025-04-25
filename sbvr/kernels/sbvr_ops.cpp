@@ -35,7 +35,7 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
 
     auto out = torch::empty({M, N},
                          torch::dtype(torch::kFloat16).device(l_bvr.device()));
-
+    // __half* out = nullptr;
     // Handle optional bias
     __half* bias_ptr = nullptr;
     if (bias_opt.has_value() && bias_opt->defined()) {
@@ -52,6 +52,7 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
         reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
         bias_ptr,
         reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        // out,
         M, N, K,
         l_num_sums, r_num_sums,
         l_cache_size, r_cache_size);

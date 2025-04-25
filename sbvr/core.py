@@ -706,66 +706,19 @@ class sbvr(torch.nn.Module):
         _y_str("\n\tCoefficient Cache Shape: ") + str(self.coeff_cache.shape)
         return info_str
 
-@torch.inference_mode()
-def mm_T(lhs: sbvr, rhs: sbvr, bias: torch.Tensor = None) -> torch.Tensor:
-    if not isinstance(lhs, sbvr) or not isinstance(rhs, sbvr):
-        raise ValueError(_r_str("The SBVR object is not valid."))
-    if len(lhs.original_data_shape) != 2:
-        raise ValueError(_r_str("The LHS SBVR object is not a matrix."))
-    if len(rhs.original_data_shape) != 2:
-        raise ValueError(_r_str("The RHS SBVR object is not a matrix."))
-    if lhs.bvr_len != rhs.bvr_len:
-        raise ValueError(_r_str("Incompatible SBVR coeff group len: ") +
-                            f"LHS SBVR group length: {lhs.bvr_len}, "
-                            f"RHS SBVR group length: {rhs.bvr_len}")
-    if lhs._get_padded_data_shape()[1] != rhs._get_padded_data_shape()[1]:
-        raise ValueError(_r_str("Incompatible matrix and vector shapes: ") +
-                            f"LHS SBVR shape: {lhs.original_data_shape}, "
-                            f"RHS SBVR shape: {rhs.original_data_shape}")
-    if bias is not None and bias.shape != (rhs._get_padded_data_shape()[0],):
-        raise ValueError("Bias must be a 1D tensor with same outer dim as rhs")    
-    
-    if lhs.compute_dtype != torch.float16 or \
-        rhs.compute_dtype != torch.float16 or \
-        lhs.bvr_dtype != torch.uint32 or \
-        rhs.bvr_dtype != torch.uint32 or \
-        lhs.bvr_len != 256 or \
-        rhs.bvr_len != 256:
-            print(_r_str("Warning: SBVR objects are not using the default " +
-                        "parameters. Using unoptimized torch SBVR MM_T.") +
-                _y_str("\n\tlhs compute dtype: ") + f"{lhs.compute_dtype}, " +
-                _y_str("\n\trhs compute dtype: ") + f"{rhs.compute_dtype}, " +
-                _y_str("\n\tlhs bvr dtype: ") + f"{lhs.bvr_dtype}, " +
-                _y_str("\n\trhs bvr dtype: ") + f"{rhs.bvr_dtype}, " +
-                _y_str("\n\tlhs bvr len: ") + f"{lhs.bvr_len}, " +
-                _y_str("\n\trhs bvr len: ") + f"{rhs.bvr_len}")
-            mm = lhs.decode() @ rhs.decode().T 
-            if bias is not None:
-                mm += bias
-            return mm
-
-    l_bvr = lhs.bvr
-    l_coeff_idx = lhs.coeff_idx # [num_bvr]
-    l_coeff_cache = lhs.coeff_cache # [cache_lines, num_sums]
-    
-    r_bvr = rhs.bvr
-    r_coeff_idx = rhs.coeff_idx # [num_bvr]
-    r_coeff_cache = rhs.coeff_cache # [cache_lines, num_sums]
-    
-    out_shape = torch.Size((lhs.original_data_shape[0],
-                            rhs.original_data_shape[0]))
-    
+def mm_T(lhs, rhs, bias):    
     if bias is None:
         bias = lhs._get_dummy_bias()
     
-    return sbvr_mm_T(l_bvr,
-                     l_coeff_idx,
-                     l_coeff_cache,
-                     r_bvr,
-                     r_coeff_idx,
-                     r_coeff_cache,
-                     bias)[:out_shape[0], :out_shape[1]].contiguous()
-
+    return sbvr_mm_T(lhs.bvr,
+                     lhs.coeff_idx,
+                     lhs.coeff_cache,
+                     rhs.bvr,
+                     rhs.coeff_idx,
+                     rhs.coeff_cache,
+                     bias)
+    
+    
 def load(filename, device=None, verbose_level=1) -> sbvr:
     serialized_sbvr = torch.load(filename)
     sbvr_obj = sbvr(sbvr_serialized=serialized_sbvr, 
