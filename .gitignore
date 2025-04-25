@@ -16,4 +16,4 @@ data/
 *.zip
 
 Llama-3.2-1B-gptq-4bit/
-sbvr_model_for_eval/
+sbvr_models/

@@ -6,6 +6,7 @@ from sbvr_utils.utils_llama import sbvr_decompress_on_llama, get_llama
 MODEL_PATH = "meta-llama/Llama-3.2-1B"
 WEIGHT_PATH = "/home/nxc/sbvr/compressed_weights" 
 PATCHED_PATH = "./sbvr_model_for_eval"
+AWQ_PATH = "joshmiller656/Llama3.2-1B-AWQ-INT4"
 
 def load_and_save_sbvr_model(model_path, weight_path):
     """
@@ -57,7 +58,25 @@ def run_eval_original():
     for task, result in results["results"].items():
         print(f"Task: {task}")
         print(f"Result: {result}\n")
+        
+def run_eval_awq():
+    results = evaluator.simple_evaluate(
+        model="hf",
+        model_args=f"pretrained={AWQ_PATH},trust_remote_code=True",
+        tasks=[
+            "arc_easy", "arc_challenge", "boolq", "hellaswag",
+            "openbookqa", "piqa", "social_iqa", "winogrande"
+        ],
+        num_fewshot=0,
+        batch_size=1,
+        device="cuda"
+    )
+
+    for task, result in results["results"].items():
+        print(f"Task: {task}")
+        print(f"Result: {result}\n")
     
 if __name__ == "__main__":
     # run_csr_eval_for_sbvr_model()
     run_eval_original()
+    # run_eval_awq()
