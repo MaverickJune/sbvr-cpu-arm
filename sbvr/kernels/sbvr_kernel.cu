@@ -5,8 +5,8 @@
 #include <cstdint>
 
 #define T_BLOCK_PER_SM 16
-#define K_PER_BVR 16 // BVR size 256
-#define _1xtN_TILE_N_SIZE 8
+#define K_PER_BVR 8 // BVR size 256
+#define _1xtN_TILE_N_SIZE 4
 #define THREAD_PER_WARP 32
 #define T_BLOCK_TILE_SIZE 32
 
