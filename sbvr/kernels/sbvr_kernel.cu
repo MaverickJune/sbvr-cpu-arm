@@ -14,9 +14,10 @@ typedef void (*KernelLaunchFn)(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
-    int M, int N, int K);
+    int M, int N, int K,
+    int device_id);
 
-cudaDeviceProp cuda_prop;
+extern cudaDeviceProp cuda_prop_list[16];
 
 template <typename LIndexT, typename RIndexT>
 __global__ void cuda_naive_sbvr_mm_T(
@@ -317,16 +318,16 @@ __global__ __launch_bounds__(32, 8) void cuda_1xtN_sbvr_mm_T(
     }
 }
 
-
 template <typename LIndexT, typename RIndexT>
 void launch_naive_sbvr_kernel(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
     int M, int N, int K,
-    int l_num_sums, int r_num_sums)
+    int l_num_sums, int r_num_sums,
+    int device_id = 0)
 {
-    int blocks = cuda_prop.multiProcessorCount * T_BLOCK_PER_SM;
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
     dim3 threads = 32;
 
     // std::cout << "Launching naive SBVR kernel <" 
@@ -347,7 +348,8 @@ void launch_naive_sbvr_kernel(
         r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
         bias, out,
         M, N, K,
-        l_num_sums, r_num_sums);
+        l_num_sums, r_num_sums
+    );
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -362,10 +364,10 @@ void launch_tMxtN_sbvr_kernel(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
-    int M, int N, int K)
+    int M, int N, int K,
+    int device_id = 0)
 {
-    int blocks = 4;
-    // int blocks = cuda_prop.multiProcessorCount * T_BLOCK_PER_SM;
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
     dim3 threads = {T_BLOCK_TILE_SIZE / TILE_M, 
                     T_BLOCK_TILE_SIZE / TILE_N, 1};
 
@@ -401,7 +403,8 @@ void launch_tMxtN_sbvr_kernel_wrapper(
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
     int M, int N, int K,
-    int l_num_sums, int r_num_sums)
+    int l_num_sums, int r_num_sums,
+    int device_id = 0)
 {
     KernelLaunchFn kernel_list[] = {
         // <LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, TILE_M, TILE_N>
@@ -441,7 +444,8 @@ void launch_tMxtN_sbvr_kernel_wrapper(
            l_bvr, l_coeff_idx, l_coeff_cache,
            r_bvr, r_coeff_idx, r_coeff_cache,
            bias, out,
-           M, N, K);
+           M, N, K,
+           device_id);
 }
 
 template <typename LIndexT, typename RIndexT, int L_NUM_SUMS, int R_NUM_SUMS,
@@ -450,10 +454,11 @@ void launch_1xtN_sbvr_kernel(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
-    int M, int N, int K)
+    int M, int N, int K,
+    int device_id = 0)
 {
     // int blocks = 1;
-    int blocks = cuda_prop.multiProcessorCount * T_BLOCK_PER_SM;
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
     dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N};
 
     // std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
@@ -468,12 +473,12 @@ void launch_1xtN_sbvr_kernel(
     //           << "threads: (" << threads.x << ", " 
     //           << threads.y << ", " << threads.z << ")" << std::endl;
 
-    cuda_1xtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
-        TILE_N> <<<blocks, threads>>>(
-            l_bvr, (LIndexT*)l_coeff_idx, l_coeff_cache,
-            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K);
+    // cuda_1xtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
+    //     TILE_N> <<<blocks, threads>>>(
+    //         l_bvr, (LIndexT*)l_coeff_idx, l_coeff_cache,
+    //         r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+    //         bias, out,
+    //         M, N, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -488,7 +493,8 @@ void launch_1xtN_sbvr_kernel_wrapper(
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
     int M, int N, int K,
-    int l_num_sums, int r_num_sums)
+    int l_num_sums, int r_num_sums,
+    int device_id = 0)
 {
     KernelLaunchFn kernel_list[] = {
         // <LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, TILE_N>
@@ -523,7 +529,8 @@ void launch_1xtN_sbvr_kernel_wrapper(
            l_bvr, l_coeff_idx, l_coeff_cache,
            r_bvr, r_coeff_idx, r_coeff_cache,
            bias, out,
-           M, N, K);
+           M, N, K,
+           device_id);
 }
 
 
@@ -533,7 +540,8 @@ void launch_coeff_idx_typed_sbvr_kernel(
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
     __half* bias, __half* out,
     int M, int N, int K,
-    int l_num_sums, int r_num_sums)
+    int l_num_sums, int r_num_sums,
+    int device_id = 0)
 {
     bool supported_num_sums = (l_num_sums & 1) == 0 && (l_num_sums <= 10) &&
                               (r_num_sums & 1) == 0 && (r_num_sums <= 10);
@@ -545,7 +553,8 @@ void launch_coeff_idx_typed_sbvr_kernel(
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K,
-            l_num_sums, r_num_sums);
+            l_num_sums, r_num_sums,
+            device_id);
     }
     else
     {
@@ -554,7 +563,8 @@ void launch_coeff_idx_typed_sbvr_kernel(
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K,
-            l_num_sums, r_num_sums);
+            l_num_sums, r_num_sums,
+            device_id);
     }
 }
 
@@ -564,7 +574,8 @@ void launch_cuda_sbvr_mm_T(
     __half* bias, __half* out,
     int M, int N, int K,
     int l_num_sums, int r_num_sums,
-    int l_cache_size, int r_cache_size)
+    int l_cache_size, int r_cache_size,
+    int device_id = 0)
 {
     // printf("Shared memory per block: %zu bytes\n", cuda_prop.sharedMemPerBlock);
     // printf("Shared memory per SM: %zu bytes\n", cuda_prop.sharedMemPerMultiprocessor);
@@ -584,7 +595,8 @@ void launch_cuda_sbvr_mm_T(
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K,
-            l_num_sums, r_num_sums);
+            l_num_sums, r_num_sums,
+            device_id);
     }
     else if (use_l_uint8 && !use_r_uint8)
     {
@@ -593,7 +605,8 @@ void launch_cuda_sbvr_mm_T(
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K,
-            l_num_sums, r_num_sums);
+            l_num_sums, r_num_sums,
+            device_id);
     }
     else if (!use_l_uint8 && use_r_uint8)
     {
@@ -602,7 +615,8 @@ void launch_cuda_sbvr_mm_T(
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K,
-            l_num_sums, r_num_sums);
+            l_num_sums, r_num_sums,
+            device_id);
     }
     else
     {
@@ -611,6 +625,7 @@ void launch_cuda_sbvr_mm_T(
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K,
-            l_num_sums, r_num_sums);
+            l_num_sums, r_num_sums,
+            device_id);
     }
 }

@@ -1,8 +1,8 @@
 import torch
 import itertools
 import math
-import json
 import numpy as np
+import ctypes
 from tqdm import tqdm
 from sbvr.sbvr_cuda import sbvr_mm_T
 
@@ -707,16 +707,25 @@ class sbvr(torch.nn.Module):
         return info_str
 
 def mm_T(lhs, rhs, bias):    
-    if bias is None:
-        bias = lhs._get_dummy_bias()
-    
-    return sbvr_mm_T(lhs.bvr,
-                     lhs.coeff_idx,
-                     lhs.coeff_cache,
-                     rhs.bvr,
-                     rhs.coeff_idx,
-                     rhs.coeff_cache,
-                     bias)
+    bias_ptr = \
+        ctypes.c_void_p(bias.data_ptr()).value if bias is not None else 0
+    out = sbvr_mm_T(ctypes.c_void_p(lhs.bvr.data_ptr()).value,
+                    ctypes.c_void_p(lhs.coeff_idx.data_ptr()).value,
+                    ctypes.c_void_p(lhs.coeff_cache.data_ptr()).value,
+                    ctypes.c_void_p(rhs.bvr.data_ptr()).value,
+                    ctypes.c_void_p(rhs.coeff_idx.data_ptr()).value,
+                    ctypes.c_void_p(rhs.coeff_cache.data_ptr()).value,
+                    bias_ptr,
+                    lhs.bvr.shape[2],
+                    rhs.bvr.shape[2],
+                    lhs.bvr.shape[1],
+                    lhs.num_sums,
+                    rhs.num_sums,
+                    lhs.coeff_cache.shape[0],
+                    rhs.coeff_cache.shape[0],
+                    lhs.bvr.device.index
+                )
+    return None
     
     
 def load(filename, device=None, verbose_level=1) -> sbvr:
