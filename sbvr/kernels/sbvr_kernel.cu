@@ -4,8 +4,8 @@
 #include <iostream>
 #include <cstdint>
 
-#define T_BLOCK_PER_SM 8
-#define K_PER_BVR 8 // BVR size 256
+#define T_BLOCK_PER_SM 16
+#define K_PER_BVR 16 // BVR size 256
 #define _1xtN_TILE_N_SIZE 8
 #define THREAD_PER_WARP 32
 #define T_BLOCK_TILE_SIZE 32
@@ -17,6 +17,7 @@ typedef void (*KernelLaunchFn)(
     int M, int N, int K,
     int device_id);
 
+extern int device_count;
 extern cudaDeviceProp cuda_prop_list[16];
 
 template <typename LIndexT, typename RIndexT>
@@ -137,7 +138,7 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
 
 template <typename LIndexT, typename RIndexT, int L_NUM_SUMS, int R_NUM_SUMS,
           int TILE_N>
-__global__ __launch_bounds__(32, 8) void cuda_1xtN_sbvr_mm_T(
+__global__ void cuda_1xtN_sbvr_mm_T(
     uint32_t* l_bvr, LIndexT* l_coeff_idx, __half* __restrict__ l_coeff_cache,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
     __half* __restrict__ bias, __half* __restrict__ out,
@@ -256,9 +257,11 @@ __global__ __launch_bounds__(32, 8) void cuda_1xtN_sbvr_mm_T(
                                         (float)(__popc(((uint32_t)(l_0_1.y)) & 
                                                     ((uint32_t)(r_0_1.x))))));
                             sum = __hfma2(lr_00_11, 
-                                            coeff_mult[l_idx][r_idx * 2], sum);
+                                          coeff_mult[l_idx][r_idx * 2], 
+                                          sum);
                             sum = __hfma2(lr_01_10, 
-                                            coeff_mult[l_idx][r_idx * 2 + 1], sum);
+                                          coeff_mult[l_idx][r_idx * 2 + 1], 
+                                          sum);
                             // if (g_tid == 0)
                             //     printf("bvr_idx: %d, kidx: %d, l_idx: %d, "
                             //            "r_idx: %d, l_0_1: (%d, %d), "
@@ -473,12 +476,12 @@ void launch_1xtN_sbvr_kernel(
     //           << "threads: (" << threads.x << ", " 
     //           << threads.y << ", " << threads.z << ")" << std::endl;
 
-    // cuda_1xtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
-    //     TILE_N> <<<blocks, threads>>>(
-    //         l_bvr, (LIndexT*)l_coeff_idx, l_coeff_cache,
-    //         r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
-    //         bias, out,
-    //         M, N, K);
+    cuda_1xtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
+        TILE_N> <<<blocks, threads>>>(
+            l_bvr, (LIndexT*)l_coeff_idx, l_coeff_cache,
+            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+            bias, out,
+            M, N, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -533,41 +536,6 @@ void launch_1xtN_sbvr_kernel_wrapper(
            device_id);
 }
 
-
-template <typename LIndexT, typename RIndexT>
-void launch_coeff_idx_typed_sbvr_kernel(
-    uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
-    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
-    __half* bias, __half* out,
-    int M, int N, int K,
-    int l_num_sums, int r_num_sums,
-    int device_id = 0)
-{
-    bool supported_num_sums = (l_num_sums & 1) == 0 && (l_num_sums <= 10) &&
-                              (r_num_sums & 1) == 0 && (r_num_sums <= 10);
-
-    if (supported_num_sums && N % 4 == 0)
-    {
-        launch_1xtN_sbvr_kernel_wrapper<LIndexT, RIndexT>(
-            l_bvr, l_coeff_idx, l_coeff_cache,
-            r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K,
-            l_num_sums, r_num_sums,
-            device_id);
-    }
-    else
-    {
-        launch_naive_sbvr_kernel<LIndexT, RIndexT>(
-            l_bvr, l_coeff_idx, l_coeff_cache,
-            r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K,
-            l_num_sums, r_num_sums,
-            device_id);
-    }
-}
-
 void launch_cuda_sbvr_mm_T(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
     uint32_t* r_bvr, void* r_coeff_idx,__half* r_coeff_cache,
@@ -587,45 +555,94 @@ void launch_cuda_sbvr_mm_T(
 
     const bool use_l_uint8 = (l_cache_size <= 256);
     const bool use_r_uint8 = (r_cache_size <= 256);
-
-    if (use_l_uint8 && use_r_uint8)
+    const bool supported_num_sums = (l_num_sums & 1) == 0 && 
+                                    (l_num_sums <= 10) &&
+                                    (r_num_sums & 1) == 0 && 
+                                    (r_num_sums <= 10);
+    if (supported_num_sums)
     {
-        launch_coeff_idx_typed_sbvr_kernel<uint8_t, uint8_t>(
-            l_bvr, l_coeff_idx, l_coeff_cache,
-            r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K,
-            l_num_sums, r_num_sums,
-            device_id);
-    }
-    else if (use_l_uint8 && !use_r_uint8)
-    {
-        launch_coeff_idx_typed_sbvr_kernel<uint8_t, uint16_t>(
-            l_bvr, l_coeff_idx, l_coeff_cache,
-            r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K,
-            l_num_sums, r_num_sums,
-            device_id);
-    }
-    else if (!use_l_uint8 && use_r_uint8)
-    {
-        launch_coeff_idx_typed_sbvr_kernel<uint16_t, uint8_t>(
-            l_bvr, l_coeff_idx, l_coeff_cache,
-            r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K,
-            l_num_sums, r_num_sums,
-            device_id);
+        if (use_l_uint8 && use_r_uint8)
+        {
+            launch_1xtN_sbvr_kernel_wrapper<uint8_t, uint8_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
+        else if (use_l_uint8 && !use_r_uint8)
+        {
+            launch_1xtN_sbvr_kernel_wrapper<uint8_t, uint16_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
+        else if (!use_l_uint8 && use_r_uint8)
+        {
+            launch_1xtN_sbvr_kernel_wrapper<uint16_t, uint8_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
+        else
+        {
+            launch_1xtN_sbvr_kernel_wrapper<uint16_t, uint16_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
     }
     else
     {
-        launch_coeff_idx_typed_sbvr_kernel<uint16_t, uint16_t>(
-            l_bvr, l_coeff_idx, l_coeff_cache,
-            r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K,
-            l_num_sums, r_num_sums,
-            device_id);
+        if (use_l_uint8 && use_r_uint8)
+        {
+            launch_naive_sbvr_kernel<uint8_t, uint8_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
+        else if (use_l_uint8 && !use_r_uint8)
+        {
+            launch_naive_sbvr_kernel<uint8_t, uint16_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
+        else if (!use_l_uint8 && use_r_uint8)
+        {
+            launch_naive_sbvr_kernel<uint16_t, uint8_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
+        else
+        {
+            launch_naive_sbvr_kernel<uint16_t, uint16_t>(
+                l_bvr, l_coeff_idx, l_coeff_cache,
+                r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K,
+                l_num_sums, r_num_sums,
+                device_id);
+        }
     }
 }

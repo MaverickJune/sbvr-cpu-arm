@@ -165,13 +165,22 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
                                     num_sums, verbose_level=0)
     mat_b_sbvr = load_or_create_sbvr("matrix_b", (mat_len, mat_len), device,
                                     num_sums, verbose_level=0)
+    lhs_bvr = mat_a_sbvr.bvr
+    lhs_coeff_idx = mat_a_sbvr.coeff_idx
+    lhs_coeff_cache = mat_a_sbvr.coeff_cache
+    rhs_bvr = mat_b_sbvr.bvr
+    rhs_coeff_idx = mat_b_sbvr.coeff_idx
+    rhs_coeff_cache = mat_b_sbvr.coeff_cache
     
     torch.cuda.profiler.cudart().cudaProfilerStart()
     torch.cuda.nvtx.range_push("PyTorch CUDA MatMul")
     sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
     torch.cuda.nvtx.range_pop()
     torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
-    sbvr_cuda_mat_mat_ab = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
+    sbvr_cuda_mat_mat_ab = sbvr.sbvr_mm_T(
+                                lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                bias)
     torch.cuda.nvtx.range_pop()
     torch.cuda.profiler.cudart().cudaProfilerStop()
     
@@ -196,20 +205,22 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     print_errors(mat_mat_ab, sbvr_cuda_mat_mat_ab)
     
 def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6, 
-                          device=torch.device("cpu"), num_runs=2000):
+                          device=torch.device("cpu"), num_runs=1000):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mat_a_size = (1, mat_len)
     mat_b_size = (mat_len, mat_len)
     mat_a = load_or_create_tensor("matrix_a", mat_a_size, device)
     mat_b = load_or_create_tensor("matrix_b", mat_b_size, device)
     bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
-
-    for _ in range(5):
+    
+    for i in range(10):
         f16_matmul = mat_a @ mat_b.T + bias
-    time_start = time.time()
-    for _ in range(num_runs):
+    torch.cuda.synchronize()
+    time_start = time.perf_counter()
+    for i in range(num_runs):
         f16_matmul = mat_a @ mat_b.T + bias
-    f16_time = (time.time() - time_start) / num_runs
+    torch.cuda.synchronize()
+    f16_time = (time.perf_counter() - time_start) / num_runs
 
     sbvr_time = {}
     sbvr_dict = {}
@@ -218,16 +229,27 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
                                         verbose_level=1)
         mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b_size, device, i,
                                         verbose_level=1)
-        for _ in range(5):
-            sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
-        time_start = time.time()
+        lhs_bvr = mat_a_sbvr.bvr
+        lhs_coeff_idx = mat_a_sbvr.coeff_idx
+        lhs_coeff_cache = mat_a_sbvr.coeff_cache
+        rhs_bvr = mat_b_sbvr.bvr
+        rhs_coeff_idx = mat_b_sbvr.coeff_idx
+        rhs_coeff_cache = mat_b_sbvr.coeff_cache
+        
+        for _ in range(10):
+            sbvr_matmul = sbvr.sbvr_mm_T(
+                                    lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                    rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                    bias)
+        torch.cuda.synchronize()
+        time_start = time.perf_counter()
         for _ in range(num_runs):
-            # torch.cuda.profiler.cudart().cudaProfilerStart()
-            # torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
-            a = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
-            # torch.cuda.nvtx.range_pop()
-            # torch.cuda.profiler.cudart().cudaProfilerStop()
-        sbvr_time[i] = (time.time() - time_start) / num_runs
+            sbvr_matmul = sbvr.sbvr_mm_T(
+                                    lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                    rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                    bias)
+        torch.cuda.synchronize()
+        sbvr_time[i] = (time.perf_counter() - time_start) / num_runs
         sbvr_dict[i] = sbvr_matmul
 
     print(y_str("Matrix A Size: ") + str(mat_a_size) + ", " +
