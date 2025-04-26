@@ -19,7 +19,7 @@ def decompress_sbvr_llama(weight_path=None, model=None):
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
               device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False,
               use_gptq_4:bool = False, use_awq_4:bool = False, load_from_local:bool = False, gptq_local_model_path:str = None,
-              weight_path:str = None):
+              weight_path:str = None, sbvr_from_local_path:str = None):
     r'''
     Fetch llama model from huggingfaces
 
@@ -30,6 +30,15 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
         tokenizer_path = model_path
         
     if use_sbvr:
+        if sbvr_from_local_path:
+            model = LlamaForCausalLM.from_pretrained(
+                sbvr_from_local_path,
+                torch_dtype=torch.float16,
+                device_map=device_map   
+            )
+            tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+            
+            return model, tokenizer
         if weight_path is None:
             raise ValueError("weight_path cannot be None when use_sbvr is True")
         logger.info("Using SBVR Llama model")
@@ -122,6 +131,7 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
 
 @torch.inference_mode()
 def sbvr_decompress_on_llama(model, tokenizer, weight_dir_path:str=None, model_path:str = None):
+    
     model_signature = model_path.split("/")[-1]
     sbvr_save_path = f"./sbvr_models/{model_signature}-sbvr-4"
     if weight_dir_path is None:
@@ -149,6 +159,8 @@ def sbvr_decompress_on_llama(model, tokenizer, weight_dir_path:str=None, model_p
     model.save_pretrained(sbvr_save_path)
     tokenizer.save_pretrained(sbvr_save_path)
     logger.info(f"Saved decompressed model to {sbvr_save_path}")
+    
+
 
 @torch.no_grad()
 def get_layer_ffn_weight(model, layer_idx):

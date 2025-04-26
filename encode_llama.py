@@ -90,7 +90,7 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
 
 
 if __name__ == "__main__":
-    MODEL_PATH = "meta-llama/Llama-3.2-1B"
+    MODEL_PATH = "meta-llama/Llama-3.2-3B"
     NUM_SUMS = 4
     SAVE_PATH = "compressed_weights"
     
