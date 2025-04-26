@@ -4,7 +4,7 @@ import math
 import numpy as np
 import ctypes
 from tqdm import tqdm
-from sbvr.sbvr_cuda import sbvr_mm_T
+from sbvr.sbvr_cuda import _sbvr_mm_T
 
 def _r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
@@ -292,7 +292,7 @@ class sbvr(torch.nn.Module):
     @torch.inference_mode()
     def _get_dummy_bias(self):
         if not hasattr(self, 'dummy_bias'):
-            self.dummy_bias = torch.zeros([],
+            self.dummy_bias = torch.zeros([0],
                                           dtype=self.compute_dtype,
                                           device=self.coeff_cache.device)
         return self.dummy_bias
@@ -706,6 +706,17 @@ class sbvr(torch.nn.Module):
         _y_str("\n\tCoefficient Cache Shape: ") + str(self.coeff_cache.shape)
         return info_str
     
+def mm_T(lhs, rhs, bias):
+    lhs_bvr = lhs.bvr
+    lhs_coeff_idx = lhs.coeff_idx
+    lhs_coeff_cache = lhs.coeff_cache
+    rhs_bvr = rhs.bvr
+    rhs_coeff_idx = rhs.coeff_idx
+    rhs_coeff_cache = rhs.coeff_cache
+    if bias is None:
+        bias = lhs._get_dummy_bias()
+    return _sbvr_mm_T(lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                rhs_bvr, rhs_coeff_idx, rhs_coeff_cache, bias)
     
 def load(filename, device=None, verbose_level=1) -> sbvr:
     serialized_sbvr = torch.load(filename)

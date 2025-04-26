@@ -4,11 +4,10 @@
 #include <iostream>
 #include <cstdint>
 
+#define T_BLOCK_PER_SM 24
 #define K_PER_BVR 8 // BVR size 256
-#define T_BLOCK_PER_SM 16
-#define _1xtN_TILE_N_SIZE 32
+#define _1xtN_TILE_N_SIZE 4
 #define THREAD_PER_WARP 32
-#define WARP_PER_TBLOCK 8
 #define T_BLOCK_TILE_SIZE 32
 
 typedef void (*KernelLaunchFn)(
@@ -138,7 +137,7 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
 }
 
 template <typename LIndexT, typename RIndexT, int L_NUM_SUMS, int R_NUM_SUMS,
-          int TILE_N, int BDIM_X, int BDIM_Y, int BDIM_Z>
+          int TILE_N>
 __global__ void cuda_1xtN_sbvr_mm_T(
     uint32_t* l_bvr, LIndexT* l_coeff_idx, __half* __restrict__ l_coeff_cache,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
@@ -153,23 +152,10 @@ __global__ void cuda_1xtN_sbvr_mm_T(
     // r_coeff_idx: [num_bvr_per_K, N]
     // r_coeff_cache: [cache_size, R_NUM_SUMS]
 
-    // Block Shape:
-    // < TILE_N, 32/TILE_N, WARP_PER_TBLOCK(8)>
-    // Maps to:
-    // < N, K index within BVR, BVR index>
-
     const int tblock_per_N = (N + TILE_N - 1) / TILE_N;
     const int bvr_per_K = K / K_PER_BVR;
-    static __shared__ __half2 sum_shared[BDIM_Z][BDIM_X];
-    const int g_tid = blockIdx.x * BDIM_X * BDIM_Y * BDIM_Z + 
-                        threadIdx.z * BDIM_X * BDIM_Y +
-                        threadIdx.y * BDIM_X + threadIdx.x;
-
-    // if (g_tid == 0)
-    //     printf("gTid %d) bi.x:%d, ti.x: %d, ti.y: %d, ti.z: %d, M: %d, N: %d, "
-    //             "tblock_per_N %d, l_num_sums: %d, r_num_sums: %d, bvr_per_K: %d\n",
-    //             g_tid, blockIdx.x, threadIdx.x, threadIdx.y, threadIdx.z,
-    //             M, N, tblock_per_N, L_NUM_SUMS, R_NUM_SUMS, bvr_per_K);
+    // const int g_tid = blockIdx.x * THREAD_PER_WARP + 
+    //                     threadIdx.y * TILE_N + threadIdx.x;
     
     for (int tblock_id = blockIdx.x; tblock_id < tblock_per_N * M;
          tblock_id += gridDim.x)
@@ -179,163 +165,137 @@ __global__ void cuda_1xtN_sbvr_mm_T(
         __half2 sum = __float2half2_rn(0.0f);
         if (n < N)
         {
-            // if (threadIdx.x == 0)
-            //     printf("gTid %d) Tblock_id %d m %d, n %d\n",
-            //         tblock_id, m, n);
+            
+            // if (g_tid == 0)
+            //     printf("gTid %d) bi.x:%d, ti.x: %d, ti.y: %d, "
+            //            "Tblock_id %d, M: %d, N: %d, m: %d, n: %d, "
+            //            "l_num_sums: %d, r_num_sums: %d, bvr_per_K: %d\n",
+            //            g_tid, blockIdx.x, threadIdx.x, threadIdx.y,
+            //            tblock_id, M, N, m, n,
+            //            L_NUM_SUMS, R_NUM_SUMS, bvr_per_K);
 
-            for (int bvr_idx = threadIdx.z; bvr_idx < bvr_per_K; 
-                    bvr_idx += BDIM_Z)
+            for (int bvr_idx = threadIdx.y; bvr_idx < bvr_per_K; 
+                    bvr_idx += blockDim.y)
             {
-                // Reduce Binary Vectors
-                int2 popc_sum [L_NUM_SUMS / 2][R_NUM_SUMS] = {};
+                int2 popc_cache [L_NUM_SUMS / 2][R_NUM_SUMS] = {};
                 #pragma unroll
-                for (int k = threadIdx.y; k < K_PER_BVR; k += BDIM_Y)
+                for (int k = 0; k < K_PER_BVR; k++)
                 {
                     const int k_idx = bvr_idx * K_PER_BVR + k;   
-                    int2 l_bvr_list[L_NUM_SUMS / 2];
-                    int2 r_bvr_list[R_NUM_SUMS / 2];
-                    // l_bvr: [L_NUM_SUMS/2, K, M, 2]
-                    const int2*  l_bvr_ptr = (int2*)&l_bvr[(k_idx * M + m) * 2];
-                    // r_bvr: [R_NUM_SUMS/2, K, N, 2]
+                    const int2* l_bvr_ptr = (int2*)&l_bvr[(k_idx * M + m) * 2];
                     const int2* r_bvr_ptr = (int2*)&r_bvr[(k_idx * N + n) * 2];
-
-                    #pragma unroll
-                    for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
-                        l_bvr_list[l_idx] = l_bvr_ptr[l_idx * K * M];
-                    #pragma unroll
-                    for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
-                        r_bvr_list[r_idx] = r_bvr_ptr[r_idx * K * N];
-
                     #pragma unroll
                     for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
                     {
-                        const int2 l_0_1 = l_bvr_list[l_idx];
+                        const int2 l_0_1 =l_bvr_ptr[l_idx * K * M];
                         #pragma unroll
                         for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
                         {
-                            const int2 r_0_1 = r_bvr_list[r_idx];
-                            popc_sum[l_idx][r_idx * 2].x += 
-                                        __popc(((uint32_t)(l_0_1.x)) & 
-                                            ((uint32_t)(r_0_1.x)));
-                            popc_sum[l_idx][r_idx * 2].y += 
-                                        __popc(((uint32_t)(l_0_1.y)) & 
-                                            ((uint32_t)(r_0_1.y)));
-                            popc_sum[l_idx][r_idx * 2 + 1].x += 
-                                        __popc(((uint32_t)(l_0_1.x)) & 
-                                            ((uint32_t)(r_0_1.y)));
-                            popc_sum[l_idx][r_idx * 2 + 1].y += 
-                                        __popc(((uint32_t)(l_0_1.y)) & 
-                                            ((uint32_t)(r_0_1.x)));
-                            // if (threadIdx.x == 0)
-                            //     printf("RB gTid %d) bvr_idx: %d, kidx: %d, l_idx: %d, "
-                            //         "r_idx: %d, l_0_1: (%d, %d), "
-                            //         "r_0_1: (%d, %d), "
-                            //         "pop_sum_0 (%d, %d), pop_sum_1 (%d, %d)\n",
-                            //         g_tid, bvr_idx, k_idx, l_idx, r_idx,
-                            //         l_0_1.x, l_0_1.y,
-                            //         r_0_1.x, r_0_1.y,
-                            //         popc_sum[l_idx][r_idx * 2].x,
-                            //         popc_sum[l_idx][r_idx * 2].y,
-                            //         popc_sum[l_idx][r_idx * 2 + 1].x,
-                            //         popc_sum[l_idx][r_idx * 2 + 1].y);
+                            const int2 r_0_1 =r_bvr_ptr[r_idx * K * N];
+                            popc_cache[l_idx][r_idx * 2].x += 
+                                                __popc(((uint32_t)(l_0_1.x)) & 
+                                                    ((uint32_t)(r_0_1.x)));
+                            popc_cache[l_idx][r_idx * 2].y += 
+                                                __popc(((uint32_t)(l_0_1.y)) & 
+                                                    ((uint32_t)(r_0_1.y)));
+                            popc_cache[l_idx][r_idx * 2 + 1].x += 
+                                                __popc(((uint32_t)(l_0_1.x)) & 
+                                                    ((uint32_t)(r_0_1.y)));
+                            popc_cache[l_idx][r_idx * 2 + 1].y += 
+                                                __popc(((uint32_t)(l_0_1.y)) & 
+                                                    ((uint32_t)(r_0_1.x)));
+                            // if (g_tid == 0)
+                            //     printf("bvr_idx: %d, kidx: %d, l_idx: %d, "
+                            //            "r_idx: %d, l_0_1: (%d, %d), "
+                            //            "r_0_1: (%d, %d), lr_00_11: (%f, %f), "
+                            //            "lr_01_10: (%f, %f), co_mul_00_11: (%f, %f), "
+                            //            "co_mul_01_10: (%f, %f), sum: (%f, %f)\n",
+                            //            bvr_idx, k_idx, l_idx, r_idx,
+                            //            l_0_1.x, l_0_1.y,
+                            //            r_0_1.x, r_0_1.y,
+                            //            __half2float(lr_00_11.x), 
+                            //            __half2float(lr_00_11.y),
+                            //            __half2float(lr_01_10.x), 
+                            //            __half2float(lr_01_10.y),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2].x),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2].y),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2 + 1].x),
+                            //            __half2float(
+                            //                     coeff_mult[l_idx][r_idx * 2 + 1].y),
+                            //            __half2float(sum.x), 
+                            //            __half2float(sum.y));
                         }
                     }
                 }
-
-                const int l_coeff_cache_idx = l_coeff_idx[bvr_idx * M + m];
-                const int r_coeff_cache_idx = r_coeff_idx[bvr_idx * N + n];
                 const __half2* l_coeff_ptr = 
-                        (__half2*)&l_coeff_cache[l_coeff_cache_idx * L_NUM_SUMS];
+                        (__half2*)&l_coeff_cache[l_coeff_idx[bvr_idx * M + m] 
+                                                    * L_NUM_SUMS];
                 const __half2* r_coeff_ptr = 
-                        (__half2*)&r_coeff_cache[r_coeff_cache_idx * R_NUM_SUMS];
-                    
-                // Multiply Coefficients
+                        (__half2*)&r_coeff_cache[r_coeff_idx[bvr_idx * N + n] 
+                                                    * R_NUM_SUMS];
                 #pragma unroll
                 for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
                 {
-                    const __half2 l_coeff = l_coeff_ptr[l_idx];
                     #pragma unroll
                     for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
                     {
-                        const __half2 r_coeff = r_coeff_ptr[r_idx];
-                        const __half2 coeff_0 = __hmul2(l_coeff, r_coeff);
-                        const __half2 coeff_1 = __hmul2(l_coeff, 
-                                                    __halves2half2(
-                                                        __high2half(r_coeff), 
-                                                        __low2half(r_coeff))); 
-                        const __half2 popc_h_0 = __halves2half2(
-                            __float2half(popc_sum[l_idx][r_idx * 2].x),
-                            __float2half(popc_sum[l_idx][r_idx * 2].y)
-                        );
-                        const __half2 popc_h_1 = __halves2half2(
-                            __float2half(popc_sum[l_idx][r_idx * 2 + 1].x),
-                            __float2half(popc_sum[l_idx][r_idx * 2 + 1].y)
-                        );
+                        const __half2 popc_h_0 = 
+                            __halves2half2(
+                                __float2half(
+                                    (float)popc_cache[l_idx][r_idx * 2].x),
+                                __float2half(
+                                    (float)popc_cache[l_idx][r_idx * 2].y));
+                        const __half2 popc_h_1 = 
+                            __halves2half2(
+                                __float2half(
+                                    (float)popc_cache[l_idx][r_idx * 2 + 1].x),
+                                __float2half(
+                                    (float)popc_cache[l_idx][r_idx * 2 + 1].y));
+                        const __half2 coeff_0 = 
+                            __hmul2(l_coeff_ptr[l_idx], r_coeff_ptr[r_idx]);
+                        const __half2 coeff_1 =
+                            __hmul2(l_coeff_ptr[l_idx], 
+                                __halves2half2(__high2half(r_coeff_ptr[r_idx]), 
+                                            __low2half(r_coeff_ptr[r_idx])));        
                         sum = __hfma2(coeff_0, popc_h_0, sum);
                         sum = __hfma2(coeff_1, popc_h_1, sum);
-                        // if (threadIdx.x == 0)
-                        //     printf("\tMC gTid %d) tblock_id: %d, m: %d, n: %d, "
-                        //         "coeff_0 (%f, %f), coeff_1 (%f, %f), "
-                        //         "popc_h_0 (%f, %f), popc_h_1 (%f, %f), "
-                        //         "sum: (%f, %f)\n", 
-                        //     g_tid, tblock_id, m, n, 
-                        //     __half2float(coeff_0.x), __half2float(coeff_0.y),
-                        //     __half2float(coeff_1.x), __half2float(coeff_1.y),
-                        //     __half2float(popc_h_0.x), __half2float(popc_h_0.y),
-                        //     __half2float(popc_h_1.x), __half2float(popc_h_1.y),
-                        //     __half2float(sum.x), __half2float(sum.y));
+
                     }
                 }
             }
+            
+            // printf("\tgTid %d) tblock_id: %d, m: %d, n: %d, sum: (%f, %f)\n", 
+            //             g_tid, tblock_id, m, n, __half2float(sum.x), 
+            //             __half2float(sum.y));
+            
         }
-
-        // Reduce the sum across BDIM_Y
+        // Reduce the sum across blockDim.y
         #pragma unroll
-        for (int i = BDIM_Y / 2; i > 0; i /= 2)
+        for (int i = (THREAD_PER_WARP / TILE_N) / 2; i > 0; i /= 2)
         {
-            const __half2 rec = __shfl_down_sync(0xFFFFFFFF, sum, i * TILE_N);
+            __half2 rec = __shfl_down_sync(0xFFFFFFFF, 
+                                         sum, i * TILE_N);
             sum = __hadd2(sum, rec);
             // if (threadIdx.y == 0)
-            //     printf("BY gTid %d) tblock_id: %d, m: %d, n: %d, stride %d, " 
+            //     printf("\tgTid %d) tblock_id: %d, m: %d, n: %d, stride %d, " 
             //             "rec (%f, %f), sum: (%f, %f)\n", 
             //                 g_tid, tblock_id, m, n, i * TILE_N,
             //                 __half2float(rec.x), __half2float(rec.y), 
             //                 __half2float(sum.x), __half2float(sum.y));
         }
-
-        // Store the result in the shared output matrix
-        if (threadIdx.y == 0)
-            sum_shared[threadIdx.z][threadIdx.x] = sum;
-        __syncthreads();
-
-        // Reduce across shared outputs
-        const int lane_id = threadIdx.y * BDIM_X + threadIdx.x;
-        const int warp_id = threadIdx.z;
-        if (warp_id < BDIM_Z * BDIM_X / THREAD_PER_WARP)
+        // Store the result in the output matrix
+        if (threadIdx.y == 0 && n < N)
         {
-            const int zid = lane_id % BDIM_Z;
-            const int xid = warp_id * (THREAD_PER_WARP / BDIM_Z) +
-                            lane_id / BDIM_Z; 
-            sum = sum_shared[zid][xid];
-            #pragma unroll
-            for (int i = BDIM_Z / 2; i > 0; i /= 2)
-            {
-                const __half2 rec = __shfl_down_sync(0xFFFFFFFF, sum, i);
-                sum = __hadd2(sum, rec);
-            }
-            if (zid == 0)
-            {
-                __half bias_val = 
-                            (bias != nullptr ? bias[n] : __float2half(0.0f));
-                sum.x = __hadd(sum.x, sum.y);  
-                sum.x = __hadd(sum.x, bias_val); 
-                int new_n = (tblock_id / M) * TILE_N + xid;
-                if (new_n < N)
-                    out[m * N + new_n] = sum.x; 
-                // if (zid == 0)
-                //     printf("\tO gTid %d) tblock_id: %d, m: %d, n: %d, sum: %f\n", 
-                //         g_tid, tblock_id, m, n, __half2float(sum.x));
-            }
+            __half bias_val = (bias != nullptr ? bias[n] : __float2half(0.0f));
+            sum.x = __hadd(sum.x, sum.y);  
+            sum.x = __hadd(sum.x, bias_val); 
+            out[m * N + n] = sum.x; 
+            // if (g_tid == 0)
+            //     printf("\tgTid %d) tblock_id: %d, m: %d, n: %d, sum: %f\n", 
+            //         g_tid, tblock_id, m, n, __half2float(sum.x));
         }
     }
 }
@@ -481,7 +441,7 @@ void launch_1xtN_sbvr_kernel(
 {
     // int blocks = 1;
     int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
-    dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N, WARP_PER_TBLOCK};
+    dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N};
 
     // std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
     //           << typeid(LIndexT).name() << ", " 
@@ -496,12 +456,11 @@ void launch_1xtN_sbvr_kernel(
     //           << threads.y << ", " << threads.z << ")" << std::endl;
 
     cuda_1xtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
-        TILE_N, TILE_N, THREAD_PER_WARP / TILE_N, WARP_PER_TBLOCK> 
-            <<<blocks, threads>>>(
-                l_bvr, (LIndexT*)l_coeff_idx, l_coeff_cache,
-                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
-                bias, out,
-                M, N, K);
+        TILE_N> <<<blocks, threads>>>(
+            l_bvr, (LIndexT*)l_coeff_idx, l_coeff_cache,
+            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+            bias, out,
+            M, N, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -565,6 +524,9 @@ void launch_cuda_sbvr_mm_T(
     int l_cache_size, int r_cache_size,
     int device_id = 0)
 {
+    // printf("Shared memory per block: %zu bytes\n", cuda_prop.sharedMemPerBlock);
+    // printf("Shared memory per SM: %zu bytes\n", cuda_prop.sharedMemPerMultiprocessor);
+
     // std::cout << "sbvr_mm_T: M=" << M << ", N=" << N << ", K=" << K
     // << ", l_num_sums=" << l_num_sums << ", r_num_sums=" << r_num_sums
     // << ", l_cache_size=" << l_cache_size << ", r_cache_size=" << r_cache_size

@@ -94,9 +94,9 @@ void sbvr_cuda_init()
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("sbvr_cuda_init", &sbvr_cuda_init,
+    m.def("_sbvr_cuda_init", &sbvr_cuda_init,
         "Initialization function for the SBVR CUDA kernels");
-    m.def("sbvr_mm_T", &sbvr_mm_T, 
+    m.def("_sbvr_mm_T", &sbvr_mm_T, 
           py::arg("l_bvr"),
           py::arg("l_coeff_idx"),
           py::arg("l_coeff_cache"),

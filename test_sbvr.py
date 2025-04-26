@@ -115,8 +115,8 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
                                         verbose_level=2)
         mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_size, device, i,
                                         verbose_level=2)
-        # sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr)
-        sbvr_matmul = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T 
+        sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, None)
+        # sbvr_matmul = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T 
         sbvr_dict[i] = sbvr_matmul
         time_dict[i] = time.time() - time_start
 
@@ -186,7 +186,7 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     rhs_coeff_cache = mat_b_sbvr.coeff_cache
     
     sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
-    sbvr_cuda_mat_mat_ab = sbvr.sbvr_mm_T(
+    sbvr_cuda_mat_mat_ab = sbvr._sbvr_mm_T(
                                 lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                                 rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                 bias)
@@ -255,14 +255,14 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         rhs_coeff_cache = mat_b_sbvr.coeff_cache
         
         for _ in range(10):
-            sbvr_matmul = sbvr.sbvr_mm_T(
+            sbvr_matmul = sbvr._sbvr_mm_T(
                                     lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                     bias)
         torch.cuda.synchronize()
         time_start = time.perf_counter()
         for _ in range(num_runs):
-            sbvr_matmul = sbvr.sbvr_mm_T(
+            sbvr_matmul = sbvr._sbvr_mm_T(
                                     lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                     bias)
