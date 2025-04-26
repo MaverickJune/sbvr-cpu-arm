@@ -111,9 +111,9 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
         time_start = time.time()
-        mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_size, device, i,
+        mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a.shape, device, i,
                                         verbose_level=2)
-        mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_size, device, i,
+        mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b.shape, device, i,
                                         verbose_level=2)
         sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, None)
         # sbvr_matmul = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T 
@@ -162,8 +162,8 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     #                       [0, 0, 0],], 
     #                     dtype=torch.float16, device=device)
     mat_a = load_or_create_tensor("matrix_a", (mat_len, mat_len), device)
-    mat_b = load_or_create_tensor("matrix_b", (mat_len, mat_len), device)
-    bias = torch.zeros((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
+    mat_b = load_or_create_tensor("matrix_b", (1, mat_len), device)
+    bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
     mat_mat_ab = mat_a @ mat_b.T + bias
     if do_print:
         print_tensor(mat_a, "mat_a")
@@ -174,9 +174,9 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     #                          device, num_sums, verbose_level=0)
     # mat_b_sbvr = create_sbvr(mat_b, "matrix_b", (mat_b.size(0), mat_b.size(1)), 
     #                          device, num_sums, verbose_level=0)
-    mat_a_sbvr = load_or_create_sbvr("matrix_a", (mat_len, mat_len), device,
+    mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a.shape, device,
                                     num_sums, verbose_level=1)
-    mat_b_sbvr = load_or_create_sbvr("matrix_b", (mat_len, mat_len), device,
+    mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b.shape, device,
                                     num_sums, verbose_level=1)
     lhs_bvr = mat_a_sbvr.bvr
     lhs_coeff_idx = mat_a_sbvr.coeff_idx
@@ -191,17 +191,17 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
                                 rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                 bias)
     
-    # torch.cuda.profiler.cudart().cudaProfilerStart()
-    # torch.cuda.nvtx.range_push("PyTorch CUDA MatMul")
-    # sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
-    # torch.cuda.nvtx.range_pop()
-    # torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
-    # sbvr_cuda_mat_mat_ab = sbvr.sbvr_mm_T(
-    #                             lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
-    #                             rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
-    #                             bias)
-    # torch.cuda.nvtx.range_pop()
-    # torch.cuda.profiler.cudart().cudaProfilerStop()
+    torch.cuda.profiler.cudart().cudaProfilerStart()
+    torch.cuda.nvtx.range_push("PyTorch CUDA MatMul")
+    sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
+    sbvr_cuda_mat_mat_ab = sbvr._sbvr_mm_T(
+                                lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                bias)
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.profiler.cudart().cudaProfilerStop()
     
     if do_print:
         print_tensor(mat_a_sbvr.bvr, "mat_a_sbvr.bvr")
@@ -243,9 +243,9 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
     sbvr_time = {}
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
-        mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a_size, device, i,
+        mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a.shape, device, i,
                                         verbose_level=1)
-        mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b_size, device, i,
+        mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b.shape, device, i,
                                         verbose_level=1)
         lhs_bvr = mat_a_sbvr.bvr
         lhs_coeff_idx = mat_a_sbvr.coeff_idx

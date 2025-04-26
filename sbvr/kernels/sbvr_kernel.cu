@@ -4,11 +4,12 @@
 #include <iostream>
 #include <cstdint>
 
-#define T_BLOCK_PER_SM 24
+#define BLOCK_PER_SM 8
 #define K_PER_BVR 8 // BVR size 256
 #define _1xtN_TILE_N_SIZE 4
 #define THREAD_PER_WARP 32
-#define T_BLOCK_TILE_SIZE 32
+#define WARP_PER_BLOCK 4
+#define BLOCK_TILE_SIZE 32
 
 typedef void (*KernelLaunchFn)(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
@@ -111,8 +112,8 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
 
     __half coeff_mult[L_NUM_SUMS][R_NUM_SUMS];
 
-    const int num_tblock_m = M / T_BLOCK_TILE_SIZE;
-    const int num_tblock_n = N / T_BLOCK_TILE_SIZE;
+    const int num_tblock_m = M / BLOCK_TILE_SIZE;
+    const int num_tblock_n = N / BLOCK_TILE_SIZE;
     const int num_tblock_tiles = num_tblock_m * num_tblock_n;
     const int bvr_per_K = K / K_PER_BVR;
     const int tid = threadIdx.x * blockDim.y + threadIdx.y;
@@ -121,8 +122,8 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
     for (int tblock_id = blockIdx.x; tblock_id < num_tblock_tiles;
          tblock_id += gridDim.x)
     {
-        const int tblock_m = (tblock_id / num_tblock_n) * T_BLOCK_TILE_SIZE;
-        const int tblock_n = (tblock_id % num_tblock_n) * T_BLOCK_TILE_SIZE;
+        const int tblock_m = (tblock_id / num_tblock_n) * BLOCK_TILE_SIZE;
+        const int tblock_n = (tblock_id % num_tblock_n) * BLOCK_TILE_SIZE;
         const int m = tblock_m + threadIdx.x * TILE_M;
         const int n = tblock_n + threadIdx.y * TILE_N;
         
@@ -157,8 +158,9 @@ __global__ void cuda_1xtN_sbvr_mm_T(
     // const int g_tid = blockIdx.x * THREAD_PER_WARP + 
     //                     threadIdx.y * TILE_N + threadIdx.x;
     
-    for (int tblock_id = blockIdx.x; tblock_id < tblock_per_N * M;
-         tblock_id += gridDim.x)
+    for (int tblock_id = blockIdx.x * blockDim.z + threadIdx.z; 
+        tblock_id < tblock_per_N * M;
+         tblock_id += gridDim.x * blockDim.z)
     {
         const int n = (tblock_id / M) * TILE_N + threadIdx.x;
         const int m = (tblock_id % M);
@@ -187,11 +189,11 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                     #pragma unroll
                     for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
                     {
-                        const int2 l_0_1 =l_bvr_ptr[l_idx * K * M];
+                        const int2 l_0_1 = __ldg(&l_bvr_ptr[l_idx * K * M]);
                         #pragma unroll
                         for (int r_idx = 0; r_idx < R_NUM_SUMS / 2; r_idx++)
                         {
-                            const int2 r_0_1 =r_bvr_ptr[r_idx * K * N];
+                            const int2 r_0_1 = __ldg(&r_bvr_ptr[r_idx * K * N]);
                             popc_cache[l_idx][r_idx * 2].x += 
                                                 __popc(((uint32_t)(l_0_1.x)) & 
                                                     ((uint32_t)(r_0_1.x)));
@@ -230,12 +232,12 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                         }
                     }
                 }
+                const int l_coeff_i = __ldg(&l_coeff_idx[bvr_idx * M + m]);
+                const int r_coeff_i = __ldg(&r_coeff_idx[bvr_idx * N + n]);
                 const __half2* l_coeff_ptr = 
-                        (__half2*)&l_coeff_cache[l_coeff_idx[bvr_idx * M + m] 
-                                                    * L_NUM_SUMS];
+                        (__half2*)&l_coeff_cache[l_coeff_i * L_NUM_SUMS];
                 const __half2* r_coeff_ptr = 
-                        (__half2*)&r_coeff_cache[r_coeff_idx[bvr_idx * N + n] 
-                                                    * R_NUM_SUMS];
+                        (__half2*)&r_coeff_cache[r_coeff_i * R_NUM_SUMS];
                 #pragma unroll
                 for (int l_idx = 0; l_idx < L_NUM_SUMS / 2; l_idx++)
                 {
@@ -254,12 +256,13 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                                     (float)popc_cache[l_idx][r_idx * 2 + 1].x),
                                 __float2half(
                                     (float)popc_cache[l_idx][r_idx * 2 + 1].y));
-                        const __half2 coeff_0 = 
-                            __hmul2(l_coeff_ptr[l_idx], r_coeff_ptr[r_idx]);
+                        const __half2 l_coeff = __ldg(&l_coeff_ptr[l_idx]);
+                        const __half2 r_coeff = __ldg(&r_coeff_ptr[r_idx]);
+                        const __half2 coeff_0 = __hmul2(l_coeff, r_coeff);
                         const __half2 coeff_1 =
-                            __hmul2(l_coeff_ptr[l_idx], 
-                                __halves2half2(__high2half(r_coeff_ptr[r_idx]), 
-                                            __low2half(r_coeff_ptr[r_idx])));        
+                            __hmul2(l_coeff, 
+                                        __halves2half2(__high2half(r_coeff), 
+                                                       __low2half(r_coeff)));        
                         sum = __hfma2(coeff_0, popc_h_0, sum);
                         sum = __hfma2(coeff_1, popc_h_1, sum);
 
@@ -309,7 +312,7 @@ void launch_naive_sbvr_kernel(
     int l_num_sums, int r_num_sums,
     int device_id = 0)
 {
-    int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
     dim3 threads = 32;
 
     // std::cout << "Launching naive SBVR kernel <" 
@@ -349,9 +352,9 @@ void launch_tMxtN_sbvr_kernel(
     int M, int N, int K,
     int device_id = 0)
 {
-    int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
-    dim3 threads = {T_BLOCK_TILE_SIZE / TILE_M, 
-                    T_BLOCK_TILE_SIZE / TILE_N, 1};
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
+    dim3 threads = {BLOCK_TILE_SIZE / TILE_M, 
+                    BLOCK_TILE_SIZE / TILE_N, 1};
 
     // std::cout << "Launching " << TILE_M << "x" << TILE_N << " SBVR kernel <" 
     //           << typeid(LIndexT).name() << ", " 
@@ -440,8 +443,8 @@ void launch_1xtN_sbvr_kernel(
     int device_id = 0)
 {
     // int blocks = 1;
-    int blocks = cuda_prop_list[device_id].multiProcessorCount * T_BLOCK_PER_SM;
-    dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N};
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
+    dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N, WARP_PER_BLOCK};
 
     // std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
     //           << typeid(LIndexT).name() << ", " 
