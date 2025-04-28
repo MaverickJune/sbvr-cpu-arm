@@ -280,6 +280,31 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
               + f"{sbvr_time[key]*10e6:.4f} usecs"
               + y_str(" vs ") + f"{f16_time*10e6:.4f} usecs")
         print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time[key]:.4f}x")
+        
+def sbvr_online_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
+    mat_size = (mat_len, mat_len)
+
+    mat_a = load_or_create_tensor("matrix_a", mat_size, device)
+    mat_b = load_or_create_tensor("matrix_b", mat_size, device)
+    bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
+    
+    f16_matmul = mat_a @ mat_b.T
+    time_dict = {}
+    sbvr_dict = {}
+    for i in range (sbvr_max_sums, 1, -2):
+        time_start = time.time()
+        mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b.shape, device, i,
+                                        verbose_level=2)
+        mat_b_sbvr.profile_input(mat_a, encoder_config={"num_sums": i})
+        sbvr_matmul = mat_b_sbvr.online_mm_T(mat_a, bias) # mat_a is RHS
+        sbvr_dict[i] = sbvr_matmul
+        time_dict[i] = time.time() - time_start
+
+    print(y_str("Matrix Size: ") + str(mat_size))
+    for i, (key, value) in enumerate(sbvr_dict.items()):
+        print(b_str(f"Case {i+1}: Conversion to " + f"SBVR {key} bits"))
+        print_errors(f16_matmul, value)
+        print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
 
 if __name__ == "__main__":
     torch.manual_seed(0)
@@ -290,8 +315,9 @@ if __name__ == "__main__":
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
     
-    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # os.system(f"rm -rf {out_dir}")
+    # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
+    os.system(f"rm -rf {out_dir}")

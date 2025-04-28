@@ -23,6 +23,7 @@ class _sbvr_enc_conf():
         self.s_search_num = kwargs.get("s_search_num", 40)
         self.mse_window_size = kwargs.get("mse_window_size", 20)
         self.search_extend_ratio = kwargs.get("search_extend_ratio", 1.2)
+        self.coeff_cache = kwargs.get("coeff_cache", None)
         self.cache_warmup_num = kwargs.get("cache_warmup_num", 8)
         self.acceptable_mse = kwargs.get("acceptable_mse", 10**-12)
         self.mse_history = kwargs.get("mse_history", [])
@@ -64,7 +65,9 @@ class _sbvr_serialized():
                  original_data_shape: tuple,
                  bvr: torch.Tensor,
                  coeff_idx: torch.Tensor,
-                 coeff_cache: torch.Tensor):
+                 coeff_cache: torch.Tensor,
+                 input_num_sums: int,
+                 input_coeff: torch.Tensor):
         # Save base parameters
         self.num_sums = num_sums
         self.bvr_len = bvr_len
@@ -134,6 +137,21 @@ class _sbvr_serialized():
         self.coeff_cache_shape = coeff_cache.shape
         self.coeff_cache_dtype = coeff_cache.dtype
         
+        self.input_num_sums = input_num_sums
+        if input_coeff is not None:
+            if input_coeff.dtype != self.compute_dtype:
+                raise ValueError(
+                    _r_str("The input coefficient data type does not match - "
+                            f"expected type {self.compute_dtype} but got " +
+                            f"{input_coeff.dtype}"))
+            self.input_coeff = self._serialize_tensor(input_coeff)
+            self.input_coeff_shape = input_coeff.shape
+            self.input_coeff_dtype = input_coeff.dtype
+        else:
+            self.input_coeff = None
+            self.input_coeff_shape = None
+            self.input_coeff_dtype = None
+        
     def _serialize_tensor(self, tensor: torch.Tensor) -> bytes:
         raw_bytes = tensor.detach().cpu().numpy().tobytes()
         nd_array = np.frombuffer(raw_bytes, dtype=np.int8).copy()
@@ -167,9 +185,17 @@ class _sbvr_serialized():
         coeff_cache = self._deserialize_tensor(self.coeff_cache, 
                                                self.coeff_cache_shape, 
                                                self.coeff_cache_dtype)
+        if self.input_coeff is not None:
+            input_coeff = self._deserialize_tensor(self.input_coeff, 
+                                                   self.input_coeff_shape, 
+                                                   self.input_coeff_dtype)
+        else:
+            input_coeff = None
+            
         return self.num_sums, self.bvr_len, self.compute_dtype, \
             self.bvr_dtype, self.original_dtype, self.original_data_shape, \
-            bvr, coeff_idx, coeff_cache
+            bvr, coeff_idx, coeff_cache, self.input_num_sums, input_coeff
+
         
         
 class sbvr(torch.nn.Module):
@@ -221,9 +247,13 @@ class sbvr(torch.nn.Module):
                 
             self.original_dtype = data.dtype
             self.original_data_shape = data.shape
+            
+            self.input_num_sums = -1
         
             self.bvr = None
             self.coeff_idx = None
+            self.coeff_cache = None
+            self.input_coeff = None
             self._encode_to_sbvr(data.to(_device).to(self.compute_dtype), 
                                  enc_conf)
         else:
@@ -232,7 +262,8 @@ class sbvr(torch.nn.Module):
                     _r_str("Serialized SBVR object is not valid"))
             self.num_sums, self.bvr_len, self.compute_dtype, \
                 self.bvr_dtype, self.original_dtype, self.original_data_shape, \
-                bvr, coeff_idx, coeff_cache = sbvr_serialized.deserialize_sbvr()
+                bvr, coeff_idx, coeff_cache, self.input_num_sums, \
+                                input_coeff = sbvr_serialized.deserialize_sbvr()
                 
             if enforce_bvr_len is not None and \
                 self.bvr_len != enforce_bvr_len:
@@ -258,6 +289,11 @@ class sbvr(torch.nn.Module):
                                                 requires_grad=False)
             self.coeff_cache = torch.nn.Parameter(coeff_cache.to(_device),
                                                   requires_grad=False)
+            if input_coeff is not None:
+                self.input_coeff = torch.nn.Parameter(
+                    input_coeff.to(_device), requires_grad=False)
+            else:
+                self.input_coeff = None
     
     @torch.inference_mode()
     def _get_bvr_num_bits(self):
@@ -279,6 +315,14 @@ class sbvr(torch.nn.Module):
             else:
                 self.padded_data_shape = None
         return self.padded_data_shape
+    
+    @torch.inference_mode()
+    def _get_padded_input_shape(self, input):
+        padded_input_shape = list(input.shape)
+        padded_input_shape[-1] = \
+            (input.shape[-1] + self.bvr_len - 1) // self.bvr_len * self.bvr_len
+        padded_input_shape = torch.Size(list(padded_input_shape))
+        return padded_input_shape
         
     @torch.inference_mode()
     def _get_bin_combs(self):
@@ -299,7 +343,7 @@ class sbvr(torch.nn.Module):
         
     @torch.inference_mode()
     def _check_coeff_cache_full(self, enc_conf):
-        if enc_conf.num_coeff_cache_lines >= self.coeff_cache.shape[0]:
+        if enc_conf.num_coeff_cache_lines >= enc_conf.coeff_cache.shape[0]:
             return True
         return False
         
@@ -426,7 +470,7 @@ class sbvr(torch.nn.Module):
         if (enc_conf.num_coeff_cache_lines >= enc_conf.cache_warmup_num):
             # Setup the search space
             coeff_search_space = \
-                self.coeff_cache[:enc_conf.num_coeff_cache_lines]
+                enc_conf.coeff_cache[:enc_conf.num_coeff_cache_lines]
             # Setup the cutoff MSE 
             window_size = min(len(enc_conf.mse_history), 
                               enc_conf.mse_window_size)
@@ -454,7 +498,7 @@ class sbvr(torch.nn.Module):
                         f"(Hitrate: {hitrate:.2f}) - " +
                         _y_str("Coeff cache: ") +
                         f"{enc_conf.num_coeff_cache_lines}/" +
-                        f"{self.coeff_cache.shape[0]}" +
+                        f"{enc_conf.coeff_cache.shape[0]}" +
                         _y_str("\n\t\tCutoff MSE: ") + f"{cutoff_mse:.4e}" +
                         ", " + _y_str("Best MSE: ") + f"{min_mse:.4e}" +
                         _y_str("\n\t\tCoeff: ") + str(best_coeff_str))
@@ -492,7 +536,7 @@ class sbvr(torch.nn.Module):
             else:
                 # If the new search space is better than the cached one:
                 # Cache the results
-                coeff_diff = self.coeff_cache - \
+                coeff_diff = enc_conf.coeff_cache - \
                     coeff_search_space[new_coeff_idx].unsqueeze(0)
                 avg_abs_coeff = coeff_search_space[new_coeff_idx].abs().sum(-1)
                 mask = coeff_diff.abs().sum(-1) < avg_abs_coeff*0.0001
@@ -501,7 +545,7 @@ class sbvr(torch.nn.Module):
                     nonzero_idx = mask.nonzero(as_tuple=True)[0]
                     best_coeff_idx = nonzero_idx[0]
                 else:
-                    self.coeff_cache[enc_conf.num_coeff_cache_lines] =\
+                    enc_conf.coeff_cache[enc_conf.num_coeff_cache_lines] =\
                         coeff_search_space[new_coeff_idx]
                     best_coeff_idx = enc_conf.num_coeff_cache_lines
                     enc_conf.num_coeff_cache_lines += 1
@@ -517,7 +561,7 @@ class sbvr(torch.nn.Module):
         if data.device.type == 'cuda':
             elem_size = torch.tensor(0, dtype=self.compute_dtype).element_size()
             diff_mat_size = 3 * enc_conf.extend_ratio * (2**self.num_sums) \
-            * self.bvr_len * elem_size
+                                * self.bvr_len * elem_size
             total_mem = torch.cuda.mem_get_info(data.device)[0]
             enc_conf.search_batch_size = int(total_mem * 0.8 / diff_mat_size)
         else:
@@ -541,6 +585,7 @@ class sbvr(torch.nn.Module):
                         dtype=self.compute_dtype, device=data.device)
         out_coeff_sel = torch.empty((data_num), dtype=torch.int32,
                                      device=data.device)
+        enc_conf.coeff_cache = self.coeff_cache
         
         if self.verbose_level > 0:
             print(enc_conf._get_conf_str())
@@ -652,7 +697,9 @@ class sbvr(torch.nn.Module):
             self.original_data_shape,
             self.bvr,
             self.coeff_idx,
-            self.coeff_cache
+            self.coeff_cache,
+            self.input_num_sums,
+            self.input_coeff
         )
     
     @torch.inference_mode()
@@ -699,8 +746,72 @@ class sbvr(torch.nn.Module):
         _y_str("\n\tNumber of Coefficient Cache Lines: ") + \
         _y_str("\n\tBVR Tensor Shape: ") + str(self.bvr.shape) + \
         _y_str("\n\tCoefficient Index Shape: ") + str(self.coeff_idx.shape) + \
-        _y_str("\n\tCoefficient Cache Shape: ") + str(self.coeff_cache.shape)
+        _y_str("\n\tCoefficient Cache Shape: ") + \
+            str(self.coeff_cache.shape) + \
+        _y_str("\n\tInput Number of Summations: ") + \
+            str(self.input_num_sums) + \
+        _y_str("\n\tInput Coefficient Shape: ") + \
+            str(self.input_coeff.shape if self.input_coeff is not None 
+                else "Input Coefficient not set") 
         return info_str
+    
+    @torch.inference_mode()
+    def profile_input(self, input, encoder_config = None):
+        if input.shape[-1] != self.original_data_shape[-1]:
+            raise ValueError(
+                _r_str("Inner dimension shape of the input does not match " + 
+                       "the original data shape, expected " +
+                       f"{self.original_data_shape[-1]} but " +
+                       f"got {input.size(-1)}"))
+        
+        if encoder_config is None:
+            encoder_config = {"num_sums": 8} 
+        enc_conf = _sbvr_enc_conf(**encoder_config)
+        self.input_num_sums = enc_conf.num_sums
+        
+        # Pad the input to the nearest multiple of bvr_len
+        if input.shape != self._get_padded_input_shape(input):
+            input_padded = torch.zeros(self._get_padded_input_shape(input), 
+                                      dtype=input.dtype, device=input.device)
+            slices = tuple(slice(0, s) for s in input.shape)
+            input_padded[slices] = input
+        else:
+            input_padded = input.copy()
+            
+        inner_dim = input_padded.shape[-1]
+        num_bvr = inner_dim // self.bvr_len
+        input_padded = input_padded.view(-1, num_bvr, self.bvr_len)
+        input_padded = input_padded.permute(1, 0, 2).contiguous()
+        input_padded = input_padded.view(num_bvr, -1).to(self.bvr.device)
+        enc_conf.cache_warmup_num = num_bvr
+        input_coeff = torch.empty((num_bvr, self.input_num_sums), 
+                                  dtype=self.compute_dtype,
+                                  device=self.bvr.device)
+        enc_conf.coeff_cache = input_coeff
+            
+        if input.device.type == 'cuda':
+            elem_size = input_coeff.element_size()
+            diff_mat_size = 3 * enc_conf.extend_ratio * input_padded.shape[1] \
+                                * (2**self.input_num_sums) * elem_size
+            total_mem = torch.cuda.mem_get_info(input.device)[0]
+            enc_conf.search_batch_size = int(total_mem * 0.8 / diff_mat_size)
+        else:
+            enc_conf.search_batch_size = 1024
+
+        for i in range(num_bvr):
+            torch.cuda.empty_cache()
+            group_data = input_padded[i]
+            coeff_idx, coeff_sel = self._encode_data(group_data, enc_conf)
+            
+        self.input_coeff = torch.nn.Parameter(input_coeff, requires_grad=False)
+    
+    def _online_tranfrom(self, input):
+        return None
+    
+    def online_mm_T(self, rhs, bias=None):
+        if bias is None:
+            bias = self._get_dummy_bias()
+        return None
     
 def mm_T(lhs, rhs, bias):
     lhs_bvr = lhs.bvr
