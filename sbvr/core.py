@@ -25,7 +25,7 @@ class _sbvr_enc_conf():
         self.mse_window_size = kwargs.get("mse_window_size", 20)
         self.search_extend_ratio = kwargs.get("search_extend_ratio", 1.2)
         self.coeff_cache = kwargs.get("coeff_cache", None)
-        self.cache_warmup_num = kwargs.get("cache_warmup_num", 8)
+        self.cache_warmup_num = kwargs.get("cache_warmup_num", 10)
         self.acceptable_mse = kwargs.get("acceptable_mse", 10**-12)
         self.mse_history = kwargs.get("mse_history", [])
         self.search_batch_size = kwargs.get("search_batch_size", 0)
@@ -345,9 +345,29 @@ class sbvr(torch.nn.Module):
     def _get_all_points(self, coeff: torch.tensor):
         return self._get_bin_combs() @ coeff
     
-    def _get_small_num_sum_search_space(self, data, enc_conf, extended=False):
+    def _get_additional_search_space(self, data, enc_conf, extended=False):
         search_budget = enc_conf.r_search_num * enc_conf.b_search_num * \
-            enc_conf.s_search_num
+            enc_conf.s_search_num * 1.4
+        if extended:
+            search_budget *= enc_conf.search_extend_ratio**3
+        search_num_per_dim = int(search_budget**(1/self.num_sums))
+        
+        data_max = torch.max(data)
+        data_min = torch.min(data)
+        
+        dim_edges = torch.linspace(data_min, data_max, self.num_sums + 1,
+                                    device=data.device, dtype=data.dtype)
+        search_space = []
+        for i in range (self.num_sums):
+            search_range_i = \
+                torch.linspace(dim_edges[i] - abs(dim_edges[i])*0.8, 
+                               dim_edges[i+1] + abs(dim_edges[i])*0.8, 
+                                search_num_per_dim + 1, device=data.device,
+                                dtype=data.dtype)
+            search_space.append(search_range_i)
+        search_space = torch.cartesian_prod(*search_space)
+
+        return search_space
     
     def _get_coeff_search_space_from_lists(self, r_list, b_list, s_list):
         exponents = torch.arange(self.num_sums, device=r_list.device) 
@@ -359,12 +379,11 @@ class sbvr(torch.nn.Module):
         search_space = s_list.view(-1, 1, 1) * search_space.unsqueeze(0)
         search_space = b_list.view(-1, 1, 1, 1) + search_space.unsqueeze(0)
         search_space = search_space.view(-1, self.num_sums)
-        _, indices = torch.sort(search_space.abs(), dim=1)
-        search_space = torch.gather(search_space, dim=1, index=indices)
-
-        return search_space, r_list, b_list, s_list
+        
+        return search_space
     
     def _get_coeff_search_space(self, data, enc_conf, extended=False):
+
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
@@ -427,8 +446,21 @@ class sbvr(torch.nn.Module):
                                   device=data.device, dtype=data.dtype)
         else:
             b_list = torch.tensor([b_min], device=data.device, dtype=data.dtype)
-
-        return self._get_coeff_search_space_from_lists(r_list, b_list, s_list)
+            
+        search_space = \
+            self._get_coeff_search_space_from_lists(r_list, b_list, s_list)
+        org_search_space_len = search_space.shape[0]
+        
+        if self.num_sums <= 6:
+            additional_search_space = \
+                self._get_additional_search_space(data, enc_conf, extended)
+            search_space = torch.cat((search_space, additional_search_space), 
+                                     dim=0)
+        
+        _, indices = torch.sort(search_space.abs(), dim=1)
+        search_space = torch.gather(search_space, dim=1, index=indices)
+            
+        return search_space, r_list, b_list, s_list, org_search_space_len
     
     def _data_diff_min_mse(self, data, candidate_matrix):
         n_ss_row = candidate_matrix.shape[0]
@@ -485,8 +517,9 @@ class sbvr(torch.nn.Module):
     def _encode_data(self, data, enc_conf):
         min_mse = float("inf")
         enc_conf.group_idx += 1
+        do_warmup = enc_conf.num_coeff_cache_lines < enc_conf.cache_warmup_num
         # Check cached search space
-        if (enc_conf.num_coeff_cache_lines >= enc_conf.cache_warmup_num):
+        if not do_warmup:
             # Setup the search space
             coeff_search_space = \
                 enc_conf.coeff_cache[:enc_conf.num_coeff_cache_lines]
@@ -527,17 +560,24 @@ class sbvr(torch.nn.Module):
 
         if not self._check_coeff_cache_full(enc_conf):
             hitrate = enc_conf.cache_hits / enc_conf.group_idx
-            coeff_search_space, r_list, b_list, s_list = \
-                self._get_coeff_search_space(data, enc_conf, hitrate > 0.6)
+            coeff_search_space, r_list, b_list, s_list, org_search_space_len = \
+                self._get_coeff_search_space(data, enc_conf, 
+                                             hitrate > 0.6 or do_warmup)
             
             # Search the cache for the best coeff and bias  
             new_mse, new_coeff_idx, new_coeff_sel = \
                     self._search_coeff_bias_space(coeff_search_space, data, 
                                                   enc_conf.acceptable_mse,
                                                   enc_conf)
-            new_b = b_list[new_coeff_idx // (len(s_list) * len(r_list))]
-            new_s = s_list[new_coeff_idx // len(r_list) % len(s_list)]
-            new_r = r_list[new_coeff_idx % len(r_list)]
+                    
+            if new_coeff_idx < org_search_space_len:
+                new_b = b_list[new_coeff_idx // (len(s_list) * len(r_list))]
+                new_s = s_list[new_coeff_idx // len(r_list) % len(s_list)]
+                new_r = r_list[new_coeff_idx % len(r_list)]
+            else:
+                new_b = -1
+                new_s = -1
+                new_r = -1
                     
             if self.verbose_level > 1:
                 new_coeff_str = ['%.4f' % elem for elem in 
