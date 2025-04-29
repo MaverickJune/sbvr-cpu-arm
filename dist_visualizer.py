@@ -111,7 +111,7 @@ def get_coeff_search_space(data, num_sums):
     r_search_num = 200
     
     r_max = math.pi*2/3
-    r_min = 0.0
+    r_min = math.pi/6
     r_gran = (r_max - r_min) / r_search_num 
         
     print(_b_str("\tNum_sums: ") + f"{num_sums}",
@@ -128,9 +128,9 @@ def get_coeff_search_space(data, num_sums):
     return get_coeff_search_space_from_lists(r_list, num_sums)
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = "cpu"
 dtype = torch.float32
-num_sums = 16
+num_sums = 12
 
 data = torch.randn(1024, device=device, dtype=dtype)
 search_matrix, r_list = get_coeff_search_space(data, num_sums)

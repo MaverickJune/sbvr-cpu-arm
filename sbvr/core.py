@@ -21,6 +21,7 @@ class _sbvr_enc_conf():
         self.r_search_num = kwargs.get("r_search_num", 64)
         self.b_search_num = kwargs.get("b_search_num", 40)
         self.s_search_num = kwargs.get("s_search_num", 40)
+        self.error_function = kwargs.get("error_function", "data_diff_mse")
         self.mse_window_size = kwargs.get("mse_window_size", 20)
         self.search_extend_ratio = kwargs.get("search_extend_ratio", 1.2)
         self.coeff_cache = kwargs.get("coeff_cache", None)
@@ -295,14 +296,12 @@ class sbvr(torch.nn.Module):
             else:
                 self.input_coeff = None
     
-    @torch.inference_mode()
     def _get_bvr_num_bits(self):
         if not hasattr(self, 'bvr_num_bits'):
             self.bvr_num_bits = \
                 torch.tensor(0, dtype=self.bvr_dtype).element_size() * 8
         return self.bvr_num_bits
     
-    @torch.inference_mode()
     def _get_padded_data_shape(self):
         if not hasattr(self, 'padded_data_shape'):
             if self.original_data_shape is not None:
@@ -316,7 +315,6 @@ class sbvr(torch.nn.Module):
                 self.padded_data_shape = None
         return self.padded_data_shape
     
-    @torch.inference_mode()
     def _get_padded_input_shape(self, input):
         padded_input_shape = list(input.shape)
         padded_input_shape[-1] = \
@@ -324,7 +322,6 @@ class sbvr(torch.nn.Module):
         padded_input_shape = torch.Size(list(padded_input_shape))
         return padded_input_shape
         
-    @torch.inference_mode()
     def _get_bin_combs(self):
         if not hasattr(self, 'bin_combs'):
             self.bin_combs = torch.tensor(
@@ -333,7 +330,6 @@ class sbvr(torch.nn.Module):
             )
         return self.bin_combs
     
-    @torch.inference_mode()
     def _get_dummy_bias(self):
         if not hasattr(self, 'dummy_bias'):
             self.dummy_bias = torch.zeros([0],
@@ -341,34 +337,33 @@ class sbvr(torch.nn.Module):
                                           device=self.coeff_cache.device)
         return self.dummy_bias
         
-    @torch.inference_mode()
     def _check_coeff_cache_full(self, enc_conf):
         if enc_conf.num_coeff_cache_lines >= enc_conf.coeff_cache.shape[0]:
             return True
         return False
         
-    @torch.inference_mode()
     def _get_all_points(self, coeff: torch.tensor):
         return self._get_bin_combs() @ coeff
     
-    @torch.inference_mode()
+    def _get_small_num_sum_search_space(self, data, enc_conf, extended=False):
+        search_budget = enc_conf.r_search_num * enc_conf.b_search_num * \
+            enc_conf.s_search_num
+    
     def _get_coeff_search_space_from_lists(self, r_list, b_list, s_list):
         exponents = torch.arange(self.num_sums, device=r_list.device) 
         search_space = r_list.unsqueeze(1) ** exponents.unsqueeze(0)
-        if r_list[0].item() < 0:
-            max = search_space[:,0::2].sum(dim=1)
-            min = search_space[:,1::2].sum(dim=1)
-        else:
-            max = search_space.sum(dim=1)
-            min = 0
+        all_vals = search_space @ self._get_bin_combs().T
+        max = all_vals.max(dim=1)[0]
+        min = all_vals.min(dim=1)[0]
         search_space = search_space / (max-min).unsqueeze(1)
         search_space = s_list.view(-1, 1, 1) * search_space.unsqueeze(0)
         search_space = b_list.view(-1, 1, 1, 1) + search_space.unsqueeze(0)
         search_space = search_space.view(-1, self.num_sums)
+        _, indices = torch.sort(search_space.abs(), dim=1)
+        search_space = torch.gather(search_space, dim=1, index=indices)
 
         return search_space, r_list, b_list, s_list
     
-    @torch.inference_mode()
     def _get_coeff_search_space(self, data, enc_conf, extended=False):
         data_max = torch.max(data)
         data_avg = torch.mean(data)
@@ -435,10 +430,7 @@ class sbvr(torch.nn.Module):
 
         return self._get_coeff_search_space_from_lists(r_list, b_list, s_list)
     
-    @torch.inference_mode()
-    def _get_min_mse_coeff(self, data, search_matrix):
-        candidate_matrix = search_matrix @ self._get_bin_combs().T
-        
+    def _data_diff_min_mse(self, data, candidate_matrix):
         n_ss_row = candidate_matrix.shape[0]
         n_ss_col = candidate_matrix.shape[1]
         
@@ -453,25 +445,34 @@ class sbvr(torch.nn.Module):
         min_idx = mse.argmin()
         coeff_comb_sel = coeff_comb_indices[min_idx]
         min_mse = mse[min_idx].item()
+        
+        return min_mse, min_idx, coeff_comb_sel
+    
+    def _get_min_mse_coeff(self, data, search_matrix, enc_conf):
+        candidate_matrix = search_matrix @ self._get_bin_combs().T
+        
+        if enc_conf.error_function == "data_diff_mse":
+            min_mse, min_idx, coeff_comb_sel = \
+                self._data_diff_min_mse(data, candidate_matrix)
 
         return min_mse, min_idx, coeff_comb_sel
     
-    @torch.inference_mode()
     def _search_coeff_bias_space(self, coeff_search_space, data, cutoff_mse,
-                                 search_batch_size):
+                                 enc_conf):
         min_mse = float("inf")
         len_search_space = coeff_search_space.shape[0]
         best_coeff_idx = -1
         best_coeff_sel = -1
         # Loop over the bias values
-        for search_start in range(0, len_search_space, search_batch_size):
+        for search_start in range(0, len_search_space, 
+                                  enc_conf.search_batch_size):
             torch.cuda.empty_cache()
             search_end = \
-                min(search_start + search_batch_size, len_search_space)
+                min(search_start + enc_conf.search_batch_size, len_search_space)
             coeff_list = coeff_search_space[search_start:search_end]
             # Call a method to get the index and MSE among these coefficients
             mse, min_idx, coeff_comb_sel = \
-                self._get_min_mse_coeff(data, coeff_list)
+                self._get_min_mse_coeff(data, coeff_list, enc_conf)
             search_space_idx = search_start + min_idx
             if mse < min_mse:
                 min_mse = mse
@@ -481,7 +482,6 @@ class sbvr(torch.nn.Module):
                     break
         return min_mse, best_coeff_idx, best_coeff_sel
     
-    @torch.inference_mode()
     def _encode_data(self, data, enc_conf):
         min_mse = float("inf")
         enc_conf.group_idx += 1
@@ -502,15 +502,14 @@ class sbvr(torch.nn.Module):
             min_mse, best_coeff_idx, best_coeff_sel = \
                 self._search_coeff_bias_space(coeff_search_space, 
                                               data, cutoff_mse, 
-                                              enc_conf.search_batch_size)
-            best_coeff_str = ['%.4f' % elem for elem in 
-                              coeff_search_space[best_coeff_idx].tolist()]
-            
+                                              enc_conf) 
             if min_mse < cutoff_mse:
                 enc_conf.cache_hits += 1
                 return best_coeff_idx, best_coeff_sel
             else:
                 if self.verbose_level > 1:
+                    best_coeff_str = ['%.4f' % elem for elem in 
+                              coeff_search_space[best_coeff_idx].tolist()]
                     hitrate = enc_conf.cache_hits / enc_conf.group_idx
                     print (_b_str("\n\tGroup ") + f"{enc_conf.group_idx}: " 
                         + _r_str("Cache Miss ") +
@@ -535,14 +534,14 @@ class sbvr(torch.nn.Module):
             new_mse, new_coeff_idx, new_coeff_sel = \
                     self._search_coeff_bias_space(coeff_search_space, data, 
                                                   enc_conf.acceptable_mse,
-                                                  enc_conf.search_batch_size)
-            new_coeff_str = ['%.4f' % elem for elem in 
-                             coeff_search_space[new_coeff_idx].tolist()]
+                                                  enc_conf)
             new_b = b_list[new_coeff_idx // (len(s_list) * len(r_list))]
             new_s = s_list[new_coeff_idx // len(r_list) % len(s_list)]
             new_r = r_list[new_coeff_idx % len(r_list)]
                     
             if self.verbose_level > 1:
+                new_coeff_str = ['%.4f' % elem for elem in 
+                             coeff_search_space[new_coeff_idx].tolist()]
                 print(_g_str("\tNew MSE: ") + f"{new_mse:.4e}" +
                     ", " + _y_str("(r, b, s): ") +
                     f"{new_r:.4e}, {new_b:.4e}, {new_s:.4e}" +
@@ -649,18 +648,15 @@ class sbvr(torch.nn.Module):
             print(enc_conf._get_result_str())
             print(self.get_sbvr_info())            
             
-    @torch.inference_mode()
     def _dec2bin(self, x, bits):
         # mask = 2 ** torch.arange(bits).to(x.device, x.dtype)
         mask = 2 ** torch.arange(bits - 1, -1, -1).to(x.device, x.dtype)
         return x.unsqueeze(-1).bitwise_and(mask).ne(0).float()
 
-    @torch.inference_mode()
     def _bin2dec(self, b, bits):
         mask = 2 ** torch.arange(bits - 1, -1, -1).to(b.device, b.dtype)
         return torch.sum(mask * b, -1)
             
-    @torch.inference_mode()
     def _change_coeff_sel_to_bvr(self, coeff_sel):
         coeff_sel_len = self._get_padded_data_shape().numel()
         num_bits = self._get_bvr_num_bits()
@@ -680,7 +676,6 @@ class sbvr(torch.nn.Module):
         
         return bvr
      
-    @torch.inference_mode()
     def _change_bvr_to_coeff_sel(self):
         coeff_sel_len = self._get_padded_data_shape().numel()
         bvr = self.bvr.permute(2, 1, 0).contiguous().view(self.num_sums, -1)
@@ -705,7 +700,6 @@ class sbvr(torch.nn.Module):
 
         return coeff_sel[:coeff_sel_len]
     
-    @torch.inference_mode()
     def _serialize(self):
         return _sbvr_serialized(
             self.num_sums,
