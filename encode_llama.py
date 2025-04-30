@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.multiprocessing as mp
 import sbvr
 import os
+import argparse
 
 from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
@@ -50,12 +51,14 @@ def process_lm_head(lm_head, num_sums=4, curr_device=0, save_path=None):
     
 
 @torch.no_grad()
-def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weights"):
-    if save_path is None:
-        raise ValueError("save_path cannot be None")
-    curr_dir = os.path.dirname(os.path.abspath(__file__))
-    save_path = os.path.join(curr_dir, save_path)
-    os.makedirs(save_path, exist_ok=True)
+def process_sbvr_llama_multi_gpu(model, num_sums=4, 
+                                 compressed_weight_path="compressed_weights",
+                                 save_path=None):
+    # if save_path is None:
+    #     raise ValueError("save_path cannot be None")
+    # curr_dir = os.path.dirname(os.path.abspath(__file__))
+    # save_path = os.path.join(curr_dir, save_path)
+    os.makedirs(compressed_weight_path, exist_ok=True)
     
     mp.set_start_method('spawn', force=True)
     n_layers = len(model.model.layers)
@@ -78,7 +81,7 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
             
         proc_list[curr_device] = mp.Process(
             target=process_single_decoder_layer,
-            args=(layer_idx, model.model.layers[layer_idx].cpu(), curr_device, num_sums, save_path)
+            args=(layer_idx, model.model.layers[layer_idx].cpu(), curr_device, num_sums, compressed_weight_path)
         )
         proc_list[curr_device].start()
         curr_device = (curr_device + 1) % n_gpus
@@ -90,10 +93,19 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
 
 
 if __name__ == "__main__":
-    MODEL_PATH = "meta-llama/Llama-3.2-3B"
-    NUM_SUMS = 4
-    SAVE_PATH = "compressed_weights"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, default="meta-llama/Llama-3.1-8B")
+    parser.add_argument("--num_sums", type=int, default=4)
+    parser.add_argument("--save_path", type=str, default="./compressed_weights")
+    parser.add_argument("--compressed_weight_path", type=str, default="./sbvr_models")
+    args = parser.parse_args()
     
-    model, tokenizer = get_llama(model_path=MODEL_PATH, device_map="cpu")
-    process_sbvr_llama_multi_gpu(model, num_sums=NUM_SUMS, save_path=SAVE_PATH)
+    # MODEL_PATH = "meta-llama/Llama-3.1-8B"
+    # NUM_SUMS = 4
+    # SAVE_PATH = f"compressed_weights/{MODEL_PATH.split('/')[-1]}"
+    
+    model, tokenizer = get_llama(model_path=args.model_path, device_map="cpu")
+    process_sbvr_llama_multi_gpu(model, num_sums=args.num_sums, 
+                                 compressed_weight_path=args.compressed_weight_path,
+                                 save_path=args.save_path)
     
