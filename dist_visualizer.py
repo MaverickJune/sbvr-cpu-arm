@@ -130,7 +130,7 @@ def get_coeff_search_space(data, num_sums):
 
 device = "cpu"
 dtype = torch.float32
-num_sums = 16
+num_sums = 4
 
 data = torch.randn(1024, device=device, dtype=dtype)
 search_matrix, r_list = get_coeff_search_space(data, num_sums)

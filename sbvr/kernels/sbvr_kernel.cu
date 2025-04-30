@@ -267,9 +267,9 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                         const __half2 popc_h_1 = 
                             __halves2half2(
                                 __ushort2half_rd(
-                                    (ushort)popc_cache[l_idx][r_idx].w),
+                                    (ushort)popc_cache[l_idx][r_idx].z),
                                 __ushort2half_rd(
-                                    (ushort)popc_cache[l_idx][r_idx].z));
+                                    (ushort)popc_cache[l_idx][r_idx].w));
                         const __half2 l_coeff = l_coeffs.coeff[l_idx];
                         const __half2 r_coeff = r_coeffs.coeff[r_idx];
                         const __half2 coeff_0 = __hmul2(l_coeff, r_coeff);

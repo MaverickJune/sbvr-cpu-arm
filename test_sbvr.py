@@ -179,8 +179,8 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
                                         verbose_level=2)
         mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b.shape, device, i,
                                         verbose_level=2)
-        # sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, None)
-        sbvr_matmul = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T 
+        sbvr_matmul = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, None)
+        # sbvr_matmul = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T 
         sbvr_dict[i] = sbvr_matmul
         time_dict[i] = time.time() - time_start
 
@@ -387,9 +387,9 @@ if __name__ == "__main__":
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
     
-    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
     # os.system(f"rm -rf {out_dir}")
