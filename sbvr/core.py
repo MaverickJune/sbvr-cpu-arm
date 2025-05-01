@@ -33,6 +33,8 @@ class _sbvr_enc_conf():
         self.cache_hits = kwargs.get("cache_hits", 0)
         self.num_coeff_cache_lines = kwargs.get("num_coeff_cache_lines", 0)
         self.extend_ratio = kwargs.get("extend_ratio", 1.2)
+        self.input_tensor = kwargs.get("input_tensor", None)
+        self.input_vectors = kwargs.get("input_vectors", None)
         
     def _get_conf_str(self):
         conf_str = _g_str("SBVR Encoder Config:") + \
@@ -480,9 +482,30 @@ class sbvr(torch.nn.Module):
         
         return min_mse, min_idx, coeff_comb_sel
     
+    def _input_inner_min_mse(self, data, candidate_matrix, enc_conf):
+        n_ss_row = candidate_matrix.shape[0]
+        n_ss_col = candidate_matrix.shape[1]
+        
+        data_inner_prd = data @ enc_conf.input_vectors.T
+        candidate_matrix = candidate_matrix.view(n_ss_row, 1, n_ss_col) 
+        
+        diff = (data_zeros + candidate_matrix)
+
+        diff_selected, coeff_comb_indices = diff.min(dim=-1) 
+        mse = diff_selected.to(torch.float32).mean(dim=-1)
+        
+        min_idx = mse.argmin()
+        coeff_comb_sel = coeff_comb_indices[min_idx]
+        min_mse = mse[min_idx].item()
+        
+        return min_mse, min_idx, coeff_comb_sel
+    
     def _get_min_mse_coeff(self, data, search_matrix, enc_conf):
         candidate_matrix = search_matrix @ self._get_bin_combs().T
         
+        if enc_conf.input_coeff is not None:
+            min_mse, min_idx, coeff_comb_sel = \
+                self._input_inner_min_mse(data, candidate_matrix, enc_conf)
         if enc_conf.error_function == "data_diff_mse":
             min_mse, min_idx, coeff_comb_sel = \
                 self._data_diff_min_mse(data, candidate_matrix)
@@ -633,10 +656,26 @@ class sbvr(torch.nn.Module):
             data_padded[slices] = data
         else:
             data_padded = data
+        data_padded = data_padded.view(-1, 
+                        self._get_padded_data_shape()[-1] // self.bvr_len,
+                        self.bvr_len)
+            
+        if enc_conf.input_tensor is not None:
+            if enc_conf.input_tensor.shape[-1] != self.data.shape[-1]:
+                raise ValueError(
+                    _r_str("Input tensor shape does not match data shape, " +
+                          f"expected {self.data.shape[-1]} but got " +
+                          f"{enc_conf.input_tensor.shape[-1]}"))
+            input_padded = torch.zeros(self._get_padded_input_shape(input),
+                                        dtype=data.dtype, device=data.device)
+            slices = tuple(slice(0, s) for s in enc_conf.input_tensor.shape)
+            input_padded[slices] = enc_conf.input_tensor.to(data.device)
+            enc_conf.input_tensor = input_padded.view(-1,
+                        self._get_padded_input_shape()[-1] // self.bvr_len,
+                        self.bvr_len).permute(1, 0, 2).contiguous()
         
         data_num = data_padded.numel()
-        num_bvr = \
-            (data_num + self.bvr_len - 1) // self.bvr_len
+        num_bvr = data_padded.numel() // self.bvr_len
         self.coeff_idx = torch.empty((num_bvr), dtype=torch.uint16, 
                                      device=data.device)
         self.coeff_cache = torch.zeros((2**16, self.num_sums), 
@@ -660,6 +699,9 @@ class sbvr(torch.nn.Module):
             group_end = \
             min(group_start + self.bvr_len, data_num)
             group_data = data_padded.flatten()[group_start:group_end]
+            if enc_conf.input_tensor is not None:
+                vector_idx = i % enc_conf.input_tensor.shape[0]
+                enc_conf.input_vectors = enc_conf.input_tensor[vector_idx]
             g_coeff_idx, coeff_sel = self._encode_data(group_data, enc_conf)
             self.coeff_idx[i] = g_coeff_idx
             out_coeff_sel[group_start:group_end] = coeff_sel

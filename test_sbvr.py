@@ -154,6 +154,48 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
     mat_size = (mat_len, mat_len)
 
     mat_a = load_or_create_tensor("matrix_a", mat_size, device)
+
+    mat_a_bf16 = mat_a.to(torch.bfloat16).to(torch.float32)
+    mat_a_e4m3fn = mat_a.to(torch.float8_e4m3fn).to(torch.float32)
+    mat_a_e4m3fnuz = mat_a.to(torch.float8_e4m3fnuz).to(torch.float32)
+    mat_a_e5m2 = mat_a.to(torch.float8_e5m2).to(torch.float32)
+    mat_a_e5m2fnuz = mat_a.to(torch.float8_e5m2fnuz).to(torch.float32)
+    mat_a_e2m1 = fp4_e2m1_to_float(float_to_fp4_e2m1(mat_a))
+    mat_a_e3m0 = fp4_e3m0_to_float(float_to_fp4_e3m0(mat_a))
+    time_dict = {}
+    sbvr_dict = {}
+    for i in range (sbvr_max_sums, 1, -2):
+        time_start = time.time()
+        mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a.shape, device, i,
+                                        verbose_level=2)
+        sbvr_dict[i] = mat_a_sbvr.decode()
+        time_dict[i] = time.time() - time_start
+
+    print(y_str("Matrix Size: ") + str(mat_size))
+    print(b_str("Case 1: Conversion to " + "bfloat16")) 
+    print_errors(mat_a, mat_a_bf16)
+    print(b_str("Case 2: Conversion to " + "float8_e4m3fn"))
+    print_errors(mat_a, mat_a_e4m3fn)
+    print(b_str("Case 3: Conversion to " + "float8_e4m3fnuz"))
+    print_errors(mat_a, mat_a_e4m3fnuz)
+    print(b_str("Case 4: Conversion to " + "float8_e5m2"))
+    print_errors(mat_a, mat_a_e5m2)
+    print(b_str("Case 5: Conversion to " + "float8_e5m2fnuz"))
+    print_errors(mat_a, mat_a_e5m2fnuz)
+    print(b_str("Case 6: Conversion to " + "float4_e2m1"))
+    print_errors(mat_a, mat_a_e2m1)
+    print(b_str("Case 7: Conversion to " + "float4_e3m0"))
+    print_errors(mat_a, mat_a_e3m0)
+    for i, (key, value) in enumerate(sbvr_dict.items()):
+        print(b_str(f"Case {i+8}: Conversion to " + f"SBVR {key}"))
+        print_errors(mat_a, value)
+        print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
+
+def sbvr_randn_mult_test(mat_len=512, sbvr_max_sums=6, 
+                         device=torch.device("cpu")):
+    mat_size = (mat_len, mat_len)
+
+    mat_a = load_or_create_tensor("matrix_a", mat_size, device)
     mat_b = load_or_create_tensor("matrix_b", mat_size, device)
 
     mat_c_16 = f64_matmul(mat_a.to(torch.float16), mat_b.T.to(torch.float16))
@@ -185,22 +227,22 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
         time_dict[i] = time.time() - time_start
 
     print(y_str("Matrix Size: ") + str(mat_size))
-    print(b_str("Case 1: Conversion to " + "bfloat16")) 
+    print(b_str("Case 1: MM_T after Conversion to " + "bfloat16")) 
     print_errors(mat_c_16, mat_c_bf16)
-    print(b_str("Case 2: Conversion to " + "float8_e4m3fn"))
+    print(b_str("Case 2: MM_T after Conversion to " + "float8_e4m3fn"))
     print_errors(mat_c_16, mat_c_e4m3fn)
-    print(b_str("Case 3: Conversion to " + "float8_e4m3fnuz"))
+    print(b_str("Case 3: MM_T after Conversion to " + "float8_e4m3fnuz"))
     print_errors(mat_c_16, mat_c_e4m3fnuz)
-    print(b_str("Case 4: Conversion to " + "float8_e5m2"))
+    print(b_str("Case 4: MM_T after Conversion to " + "float8_e5m2"))
     print_errors(mat_c_16, mat_c_e5m2)
-    print(b_str("Case 5: Conversion to " + "float8_e5m2fnuz"))
+    print(b_str("Case 5: MM_T after Conversion to " + "float8_e5m2fnuz"))
     print_errors(mat_c_16, mat_c_e5m2fnuz)
-    print(b_str("Case 6: Conversion to " + "float4_e2m1"))
+    print(b_str("Case 6: MM_T after Conversion to " + "float4_e2m1"))
     print_errors(mat_c_16, mat_c_e2m1)
-    print(b_str("Case 7: Conversion to " + "float4_e3m0"))
+    print(b_str("Case 7: MM_T after Conversion to " + "float4_e3m0"))
     print_errors(mat_c_16, mat_c_e3m0)
     for i, (key, value) in enumerate(sbvr_dict.items()):
-        print(b_str(f"Case {i+8}: Conversion to " + f"SBVR {key} bits"))
+        print(b_str(f"Case {i+8}: MM_T after Conversion to " + f"SBVR {key}"))
         print_errors(mat_c_16, value)
         print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
     
@@ -388,6 +430,7 @@ if __name__ == "__main__":
     sbvr_max_sums = sys.argv[2]
     
     sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
