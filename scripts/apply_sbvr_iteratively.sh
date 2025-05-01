@@ -1,13 +1,13 @@
 #!/bin/bash
 
 MODEL_LIST=(
-    "meta-llama/Llama-3.1-8B"
     "meta-llama/Llama-3.2-3B"
+    "meta-llama/Llama-3.1-8B"
     "meta-llama/Llama-3.2-1B"
 )
 
 NUM_SUM_LIST=(
-    2 4 8
+    4 2
 )
 
 COMPRESSED_WEIGHT_DIR_PREFIX="./compressed_weights"

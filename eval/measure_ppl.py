@@ -24,15 +24,15 @@ def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=Fa
     
     
 if __name__ == "__main__":
-    MODEL_PATH = "meta-llama/Llama-3.2-1B"
+    MODEL_PATH = "meta-llama/Llama-3.1-8B"
     WEIGHT_PATH = "/home/nxc/sbvr/compressed_weights"
     GPTQ_LOCAL_MODEL_PATH = "/home/nxclab/wonjun/bvq/Llama-3.2-1B-gptq-4bit"
     SBVR_LOCAL_PATH = "/home/nxc/sbvr/sbvr_models/Llama-3.2-1B-sbvr-4"
     
-    # measure_llama_ppl(model_path=MODEL_PATH)
+    measure_llama_ppl(model_path=MODEL_PATH)
     # measure_llama_ppl(model_path=MODEL_PATH, use_llm_int8=True)
     # measure_llama_ppl(model_path=MODEL_PATH, use_gptq_4=True, gptq_local_model_path=GPTQ_LOCAL_MODEL_PATH)
     # measure_llama_ppl(model_path=MODEL_PATH, use_awq_4=True)
-    measure_llama_ppl(model_path=MODEL_PATH, use_sbvr=True, weight_path=WEIGHT_PATH, sbvr_from_local_path=SBVR_LOCAL_PATH)
+    # measure_llama_ppl(model_path=MODEL_PATH, use_sbvr=True, weight_path=WEIGHT_PATH, sbvr_from_local_path=SBVR_LOCAL_PATH)
 
     

@@ -130,10 +130,8 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
 
 
 @torch.inference_mode()
-def sbvr_decompress_on_llama(model, tokenizer, weight_dir_path:str=None, model_path:str = None):
+def sbvr_decompress_on_llama(model, tokenizer=None, weight_dir_path:str=None, model_path:str = None, sbvr_save_path:str = None):
     
-    model_signature = model_path.split("/")[-1]
-    sbvr_save_path = f"./sbvr_models/{model_signature}-sbvr-4"
     if weight_dir_path is None:
         raise ValueError("weight_path cannot be None")
     
@@ -157,7 +155,6 @@ def sbvr_decompress_on_llama(model, tokenizer, weight_dir_path:str=None, model_p
             
     logger.info("Decompression complete")
     model.save_pretrained(sbvr_save_path)
-    tokenizer.save_pretrained(sbvr_save_path)
     logger.info(f"Saved decompressed model to {sbvr_save_path}")
     
 
