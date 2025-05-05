@@ -10,6 +10,9 @@
 #define WARP_PER_BLOCK 4
 #define BLOCK_TILE_SIZE 32
 
+// For row_deq_mm_T
+#define N_PER_BVR 8
+
 template <int NUM_SUMS>
 struct bvrs;
 
@@ -97,8 +100,149 @@ typedef void (*KernelLaunchFn)(
     int M, int N, int K,
     int device_id);
 
+typedef void (*RDKernelLaunchFN)(
+    __half* l_w,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    __half* bias,
+    __half* out,
+    int M, int N, int K,
+    int device_id);
+
 extern int device_count;
 extern cudaDeviceProp cuda_prop_list[16];
+
+template <typename RIndexT, typename RNumSums>
+__global__ void cuda_row_deq_mm_T(
+    __half* __restrict__ l_w,
+    uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
+    __half* __restrict__ bias, __half* __restrict__ out,
+    int M, int N, int K)
+{
+    /*
+    C = A @ B^T
+    r_bvr is grouped in row-direction: (N/32(num_bits in bvr dtype, uint32), K, num_sums)
+    r_coeff_idx: (N/group_size, K)
+    */
+   
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int lane = threadIdx.x & 31;
+    const int warp_id = tid >> 5;
+    const int N_EFF = N / 32; 
+    const int totalWarps = M * N_EFF;
+
+    for (int wid = warp_id; wid < totalWarps; wid += (blockDim.x * gridDim.x)>>5)
+    {
+        int m = wid / N_EFF;
+        int n = wid % N_EFF; // which group of 32 in N
+
+        float sum = (bias != nullptr) ? __half2float(bias[n * 32 + lane]) : 0.0f;
+
+        __half l_val;
+        uint32_t bv[RNumSums];
+        uint32_t curr_r_coeff_idx;
+
+        #pragma unroll
+        for (int k = 0; k < K; k++)
+        {
+            if (lane == 0)
+            {
+                l_val = l_w[m * K + k];
+                #pragma unroll
+                for (int s = 0; s < RNumSums; s++)
+                    bv[s] = r_bvr[(n * K + k) * RNumSums + s];
+                curr_r_coeff_idx = r_coeff_idx[(n / N_PER_BVR) * K + k];
+            }
+
+            float c_board[RNumSums];
+            uint32_t b_board[RNumSums];
+
+            constexpr unsigned FULL = 0xFFFFFFFFu;
+            l_val = __shfl_sync(FULL, l_val, 0);
+            curr_r_coeff_idx = __shfl_sync(FULL, curr_r_coeff_idx, 0);
+
+            #pragma unroll
+            for (int s = 0; s < RNumSums; s++)
+                bv[s] = __shfl_sync(FULL, bv[s], 0);
+            
+            float l_val_f = __half2float(l_val);
+            #pragma unroll
+            for(int s = 0; s < RNumSums; s++)
+            {
+                c_board[s] = __half2float(r_coeff_cache[curr_r_coeff_idx * RNumSums + s]);
+                b_board[s] = (bv[s] >> lane) & 1;
+            }
+
+            float dot = 0.0f;
+            #pragma unroll
+            for(int s = 0; s < RNumSums; s++)
+                dot += c_board[s] * (float)b_board[s];
+            sum += l_val_f * dot;
+        }
+        out[m * N + (n * 32 + lane)] = __float2half(sum);
+    }
+}
+
+template <typename RIndexT, typename RNumSums>
+__global__ void cuda_row_deq_wo_shfl_mm_T(
+    __half* __restrict__ l_w,
+    uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
+    __half* __restrict__ bias, __half* __restrict__ out,
+    int M, int N, int K)
+{
+    /*
+    C = A @ B^T
+    r_bvr is grouped in row-direction: (N/32(num_bits in bvr dtype, uint32), K, num_sums)
+    r_coeff_idx: (N/group_size, K)
+    In this kernel, expect that same memory addr access within a warp will fall back into a single L1 fetch
+    and broadcast
+    */
+   
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int lane = threadIdx.x & 31;
+    const int warp_id = tid >> 5;
+    const int N_EFF = N / 32; 
+    const int totalWarps = M * N_EFF;
+
+    for (int wid = warp_id; wid < totalWarps; wid += (blockDim.x * gridDim.x)>>5)
+    {
+        int m = wid / N_EFF;
+        int n = wid % N_EFF; // which group of 32 in N
+
+        float sum = (bias != nullptr) ? __half2float(bias[n * 32 + lane]) : 0.0f;
+
+        __half l_val;
+        uint32_t bv[RNumSums];
+        uint32_t curr_r_coeff_idx;
+
+        #pragma unroll
+        for (int k = 0; k < K; k++)
+        {
+            l_val = l_w[m * K + k];
+            #pragma unroll
+            for (int s = 0; s < RNumSums; s++)
+                bv[s] = r_bvr[(n * K + k) * RNumSums + s];
+            curr_r_coeff_idx = r_coeff_idx[(n / N_PER_BVR) * K + k];
+
+            float c_board[RNumSums];
+            uint32_t b_board[RNumSums];
+            
+            float l_val_f = __half2float(l_val);
+            #pragma unroll
+            for(int s = 0; s < RNumSums; s++)
+            {
+                c_board[s] = __half2float(r_coeff_cache[curr_r_coeff_idx * RNumSums + s]);
+                b_board[s] = (bv[s] >> lane) & 1;
+            }
+
+            float dot = 0.0f;
+            #pragma unroll
+            for(int s = 0; s < RNumSums; s++)
+                dot += c_board[s] * (float)b_board[s];
+            sum += l_val_f * dot;
+        }
+        out[m * N + (n * 32 + lane)] = __float2half(sum);
+    }
+}
 
 template <typename LIndexT, typename RIndexT>
 __global__ void cuda_naive_sbvr_mm_T(
@@ -150,7 +294,6 @@ __global__ void cuda_naive_sbvr_mm_T(
         }
         out[i] = __float2half(sum);
     }
-    
 }
 
 template <typename LIndexT, typename RIndexT, int LNumSums, int RNumSums,
@@ -296,6 +439,60 @@ __global__ void cuda_1xtN_sbvr_mm_T(
             out[m * N + n] = bias_val; 
         }
     }
+}
+
+template <typename RIndexT, typename RNumSums>
+void launch_sbvr_row_deq_kernel(
+    __half* l_w,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    __half* bias,
+    __half* out,
+    int M, int N, int K,
+    int device_id = 0)
+{
+    int blocks = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
+    dim3 threads = 32;
+
+    cuda_row_deq_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
+        l_w,
+        r_bvr, r_coeff_idx, r_coeff_cache,
+        bias, out,
+        M, N, K
+    )
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("CUDA error");
+    }
+}
+
+template <typename RIndexT>
+void launch_sbvr_row_deq_kernel_wrapper(
+    __half* l_w,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    __half* bias,
+    __half* out,
+    int M, int N, int K,
+    int r_num_sums,
+    int device_id = 0)
+{
+    RDKernelLaunchFN kernel_list[] = {
+        launch_sbvr_row_deq_kernel<RIndexT, 2>,
+        launch_sbvr_row_deq_kernel<RIndexT, 4>,
+        launch_sbvr_row_deq_kernel<RIndexT, 6>,
+        launch_sbvr_row_deq_kernel<RIndexT, 8>,
+        launch_sbvr_row_deq_kernel<RIndexT, 10>
+    };
+
+    int kernel_idx = (r_num_sums - 2) / 2;
+    kernel_list[kernel_idx](
+        l_w,
+        r_bvr, r_coeff_idx, r_coeff_cache,
+        bias,
+        out,
+        M, N, K,
+        device_id);
 }
 
 template <typename LIndexT, typename RIndexT>
@@ -511,6 +708,41 @@ void launch_1xtN_sbvr_kernel_wrapper(
            bias, out,
            M, N, K,
            device_id);
+}
+
+void launch_cuda_sbvr_row_deq_mm_T(
+    __half* l_w,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    __half* bias,
+    __half* out,
+    int M, int N, int K,
+    int r_num_sums,
+    int r_cache_size,
+    int device_id = 0)
+{
+    const bool use_r_uint8 = (r_cache_size <= 256);
+    if (use_r_uint8)
+    {
+        launch_sbvr_row_deq_kernel_wrapper<uint8_t>(
+            l_w,
+            r_bvr, r_coeff_idx, r_coeff_cache,
+            bias,
+            out,
+            M, N, K,
+            r_num_sums,
+            device_id);
+    }
+    else
+    {
+        launch_sbvr_row_deq_kernel_wrapper<uint16_t>(
+            l_w,
+            r_bvr, r_coeff_idx, r_coeff_cache,
+            bias,
+            out,
+            M, N, K,
+            r_num_sums,
+            device_id);
+    }
 }
 
 void launch_cuda_sbvr_mm_T(
