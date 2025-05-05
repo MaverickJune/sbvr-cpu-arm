@@ -112,7 +112,7 @@ typedef void (*RDKernelLaunchFN)(
 extern int device_count;
 extern cudaDeviceProp cuda_prop_list[16];
 
-template <typename RIndexT, typename RNumSums>
+template <typename RIndexT, int RNumSums>
 __global__ void cuda_row_deq_mm_T(
     __half* __restrict__ l_w,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
@@ -184,7 +184,7 @@ __global__ void cuda_row_deq_mm_T(
     }
 }
 
-template <typename RIndexT, typename RNumSums>
+template <typename RIndexT, int RNumSums>
 __global__ void cuda_row_deq_wo_shfl_mm_T(
     __half* __restrict__ l_w,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
@@ -444,7 +444,7 @@ __global__ void cuda_1xtN_sbvr_mm_T(
     }
 }
 
-template <typename RIndexT, typename RNumSums>
+template <typename RIndexT, int RNumSums>
 void launch_sbvr_row_deq_kernel(
     __half* l_w,
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
@@ -461,19 +461,19 @@ void launch_sbvr_row_deq_kernel(
     {
         cuda_row_deq_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
             l_w,
-            r_bvr, r_coeff_idx, r_coeff_cache,
+            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K
-        )
+        );
     }
     else
     {
         cuda_row_deq_wo_shfl_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
             l_w,
-            r_bvr, r_coeff_idx, r_coeff_cache,
+            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
             bias, out,
             M, N, K
-        )
+        );
     }
 
     cudaError_t err = cudaGetLastError();
