@@ -25,6 +25,7 @@ void launch_cuda_sbvr_row_deq_mm_T(
     int M, int N, int K,
     int r_num_sums,
     int r_cache_size,
+    int use_shfl = 0,
     int device_id = 0);
 
 int device_count;
@@ -80,7 +81,8 @@ torch::Tensor sbvr_row_deq_mm_T(
                 torch::Tensor r_bvr,
                 torch::Tensor r_coeff_idx,
                 torch::Tensor r_coeff_cache,
-                torch::Tensor bias
+                torch::Tensor bias,
+                int use_shfl = 0
             )
 {
     /* 
@@ -111,7 +113,8 @@ torch::Tensor sbvr_row_deq_mm_T(
         reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
         M, N, K,
         r_num_sums,
-        r_cache_size);
+        r_cache_size,
+        use_shfl);
 
     return out;
 }
@@ -164,5 +167,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("r_coeff_idx"),
           py::arg("r_coeff_cache"),
           py::arg("bias"),
+          py::arg("use_shfl"),
           "SBVR Row-wise, pre-dequantized Matrix-Matrix_Transposed Multiplication kernel");
 }

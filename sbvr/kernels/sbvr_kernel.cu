@@ -106,6 +106,7 @@ typedef void (*RDKernelLaunchFN)(
     __half* bias,
     __half* out,
     int M, int N, int K,
+    int use_shfl,
     int device_id);
 
 extern int device_count;
@@ -448,17 +449,30 @@ void launch_sbvr_row_deq_kernel(
     __half* bias,
     __half* out,
     int M, int N, int K,
+    int use_shfl = 0,
     int device_id = 0)
 {
     int blocks = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
     dim3 threads = 32;
 
-    cuda_row_deq_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
-        l_w,
-        r_bvr, r_coeff_idx, r_coeff_cache,
-        bias, out,
-        M, N, K
-    )
+    if (use_shfl)
+    {
+        cuda_row_deq_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
+            l_w,
+            r_bvr, r_coeff_idx, r_coeff_cache,
+            bias, out,
+            M, N, K
+        )
+    }
+    else
+    {
+        cuda_row_deq_wo_shfl_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
+            l_w,
+            r_bvr, r_coeff_idx, r_coeff_cache,
+            bias, out,
+            M, N, K
+        )
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -475,6 +489,7 @@ void launch_sbvr_row_deq_kernel_wrapper(
     __half* out,
     int M, int N, int K,
     int r_num_sums,
+    int use_shfl = 0,
     int device_id = 0)
 {
     RDKernelLaunchFN kernel_list[] = {
@@ -492,6 +507,7 @@ void launch_sbvr_row_deq_kernel_wrapper(
         bias,
         out,
         M, N, K,
+        use_shfl,
         device_id);
 }
 
@@ -718,6 +734,7 @@ void launch_cuda_sbvr_row_deq_mm_T(
     int M, int N, int K,
     int r_num_sums,
     int r_cache_size,
+    int use_shfl = 0,
     int device_id = 0)
 {
     const bool use_r_uint8 = (r_cache_size <= 256);
@@ -730,6 +747,7 @@ void launch_cuda_sbvr_row_deq_mm_T(
             out,
             M, N, K,
             r_num_sums,
+            use_shfl,
             device_id);
     }
     else
@@ -741,6 +759,7 @@ void launch_cuda_sbvr_row_deq_mm_T(
             out,
             M, N, K,
             r_num_sums,
+            use_shfl,
             device_id);
     }
 }
