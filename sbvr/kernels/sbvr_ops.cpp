@@ -167,6 +167,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("r_coeff_idx"),
           py::arg("r_coeff_cache"),
           py::arg("bias"),
-          py::arg("use_shfl"),
+          py::arg("use_shfl") = 0,
           "SBVR Row-wise, pre-dequantized Matrix-Matrix_Transposed Multiplication kernel");
 }

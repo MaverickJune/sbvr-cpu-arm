@@ -424,14 +424,14 @@ def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         rhs_coeff_cache = mat_b_sbvr_trans.coeff_cache
         
         for _ in range(10):
-            sbvr_matmul = sbvr._sbvr_row_deq_mm_T(
+            sbvr_matmul = sbvr.sbvr_cuda._sbvr_row_deq_mm_T(
                                     mat_a,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                     bias)
         torch.cuda.synchronize()
         time_start = time.perf_counter()
         for _ in range(num_runs):
-            sbvr_matmul = sbvr._sbvr_row_deq_mm_T(
+            sbvr_matmul = sbvr.sbvr_cuda._sbvr_row_deq_mm_T(
                                     mat_a,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                     bias)
@@ -484,8 +484,9 @@ if __name__ == "__main__":
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
     
-    sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_rd_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)

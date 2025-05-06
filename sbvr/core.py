@@ -5,6 +5,7 @@ import numpy as np
 import ctypes
 from tqdm import tqdm
 from sbvr.sbvr_cuda import _sbvr_mm_T
+from sbvr.sbvr_cuda import _sbvr_row_deq_mm_T
 
 def _r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
