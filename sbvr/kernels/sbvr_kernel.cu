@@ -253,79 +253,6 @@ __global__ void cuda_row_deq_wo_shfl_mm_T(
     }
 }
 
-// template <typename RIndexT, const int RNumSums, const int BK, const int BN>
-// __global__ void cuda_1xtN_rd_mm_T(
-//     __half* __restrict__ l_w,
-//     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
-//     __half* __restrict__ bias, __half* __restrict__ out,
-//     int M, int N, int K)
-// {
-//     /*
-//     In this kernel, we assume the changed memeory layout of r_bvr
-//     r_bvr: (N/32, num_sums, K)
-//     r_coeff_idx: (N/group_size, K)
-//     r_coeff_cache: (cache_size, num_sums)
-
-//     When a element of r_bvr is loaded, 32x1(N, K) patch can be decoded
-//     One warp fetch 32 patches and perform (1 x 32) @ (32, 32) GEVM iteratively
-//     along with the K dimension
-
-//     Shared memory size will be BK * (sBN * 32)
-//     Grid should be organized as (1*N / 1*BN)
-//     */
-
-//     const uint cCol = blockIdx.x;
-//     const uint per_thread_N = BN / 32;
-//     const uint max_bvr_idx = N / 32 * RNumSums * K;
-//     const uint max_coeff_idx = N / N_PER_BVR / 32 * K;
-
-//     __shared__ float Bs [BK * BN];
-//     float x[BK] = {0.0f};
-//     float w_res_temp[BN] = {0.0f};
-//     float threadResults[per_thread_N] = {0.0f};
-
-//     out += cCol * BN;
-
-//     for (uint bkIdx = 0; bkIdx < K; bkIdx += BK)
-//     {
-//         // load loop
-//         for (uint ik = 0; ik < BK; ik++)
-//             x[ik] = l_w[bkIdx * BK + ik];
-//         for (uint r_s = 0; r_s < RNumSums; r_s++)
-//         {
-//             for (uint n_off = 0; n_off < per_thread_N; n_off++)
-//             {
-//                 uint target_bvr_idx = (cCol * per_thread_N + n_off) * RNumSums * K + r_s * K + bkIdx * BK + threadIdx.x;
-//                 uint target_coeff_idx = (cCol * per_thread_N + n_off) / N_PER_BVR * K + bkIdx * BK + threadIdx.x;
-
-//                 if (target_bvr_idx >= max_bvr_idx || target_coeff_idx >= max_coeff_idx)
-//                     continue;
-
-//                 uint32_t bitvec = r_bvr[target_bvr_idx];
-//                 float coeff = __half2float(r_coeaff_cache[r_coeff_idx[target_coeff_idx] * RNumSums + r_s]);
-
-//                 uint32_t coeffi = __float_as_uint(coeff);
-//                 for(uint inner_n; inner_n < 32; inner_n++)
-//                 {
-//                     uint32_t mask = -((bitvec >> inner_n) & 1u);
-//                     w_res_temp[n_off * 32 + inner_n] += __uint_as_float(coeffi & mask);
-//                 }
-//             }
-//         }
-//         for (uint sn = 0; sn < BN; sn++)
-//             Bs[threadIdx.x * BN + sn] = w_res_temp[sn];
-//         __syncthreads();
-
-//         // compute loop
-//         // TODO: Implement the compute loop here
-
-//         __syncthreads();
-//     }
-
-//     // write back
-
-// }
-
 __device__ __forceinline__
 void warp_group_all_to_all_G4_f(
     float val,
@@ -523,8 +450,6 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
                    g_tid, tid, tblock_id, M, N, m, n,
                    LNumSums, RNumSums, bvr_per_K);
     }
-    
-    
 }
 
 template <typename LIndexT, typename RIndexT, int LNumSums, int RNumSums,
