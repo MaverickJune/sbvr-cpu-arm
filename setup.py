@@ -1,6 +1,6 @@
 import os
 from setuptools import setup
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
 
 # Read Python package dependencies
 with open("requirements.txt") as f:
