@@ -35,6 +35,22 @@ setup(
                 ],
             },
         ),
+        # CppExtension (for CPU)
+        CppExtension(
+            name='sbvr.sbvr_cpu',
+            sources=[
+                'sbvr/kernels/sbvr_kernel.cpp',  # New CPU kernel file
+            ],
+            include_dirs=[
+                sbvr_include_dir,
+            ],
+            extra_compile_args={
+                'cxx': [
+                    '-O3',
+                    '-mcpu=native',
+                ],
+            },
+        ),
     ],
     cmdclass={'build_ext': BuildExtension},
     install_requires=requirements,

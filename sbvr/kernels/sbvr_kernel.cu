@@ -358,17 +358,23 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
     }
 }
 
+
+/*
+bvr : (K/32, N, num_sums)
+coeff_id : (bvr_per_K, N)
+coeff_cache : (??? * num_sums)
+*/
 template <typename LIndexT, typename RIndexT>
 __global__ void cuda_naive_sbvr_mm_T(
     uint32_t* l_bvr, LIndexT* l_coeff_idx, __half* __restrict__ l_coeff_cache,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
     __half* __restrict__ bias, __half* __restrict__ out,
-    int M, int N, int K,
+    int M, int N, int Kdiv32,
     int l_num_sums, int r_num_sums)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int total_outputs = M * N;
-    const int bvr_per_K = K / K_PER_BVR;
+    const int bvr_per_K = Kdiv32 / K_PER_BVR;
 
     for (int i = tid; i < total_outputs; i += blockDim.x * gridDim.x) 
     {
@@ -451,6 +457,8 @@ __global__ void cuda_tMxtN_sbvr_mm_T(
     }
 }
 
+
+// sbvr_matmul_time_test ********
 template <typename LIndexT, typename RIndexT, int LNumSums, int RNumSums,
           int TileN>
 __global__ void cuda_1xtN_sbvr_mm_T(

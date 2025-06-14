@@ -6,6 +6,7 @@ import copy
 import os
 
 import sbvr.sbvr_cuda
+import sbvr.sbvr_cpu
 
 out_dir = "data"
 os.makedirs(out_dir, exist_ok=True)
@@ -499,5 +500,6 @@ if __name__ == "__main__":
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr._sbvr_neon_test()
     # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
     # os.system(f"rm -rf {out_dir}")

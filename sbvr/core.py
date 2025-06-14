@@ -711,6 +711,10 @@ class sbvr(torch.nn.Module):
         bvr = bvr.view(self.num_sums, -1, self._get_padded_data_shape()[-1] // \
                                                 self._get_bvr_num_bits())
         bvr = bvr.permute(2, 1, 0).contiguous()
+        print(f"[DEBUG] _get_padded_data_shape()={self._get_padded_data_shape()}")
+        print(f"[DEBUG] _get_bvr_num_bits()={self._get_bvr_num_bits()}")
+        print(f"[DEBUG] bvr.shape={bvr.shape}, bvr_len={self.bvr_len}, " +
+              f"bvr_num_bits={self._get_bvr_num_bits()}")
         self.bvr = torch.nn.Parameter(bvr, requires_grad=False)
         
         self.coeff_cache = \
@@ -740,24 +744,62 @@ class sbvr(torch.nn.Module):
         mask = 2 ** torch.arange(bits - 1, -1, -1).to(b.device, b.dtype)
         return torch.sum(mask * b, -1)
             
+    # def _change_coeff_sel_to_bvr(self, coeff_sel):
+    #     coeff_sel_len = self._get_padded_data_shape().numel()
+    #     num_bits = self._get_bvr_num_bits()
+    #     bvr = torch.zeros((self.num_sums, (coeff_sel_len // num_bits)),
+    #             dtype=self.bvr_dtype, device=self.coeff_cache.device)
+    #     powers = 2 ** torch.arange(num_bits, dtype=torch.int64, 
+    #                                device=self.coeff_cache.device)
+    #     iter_size = 65536
+    #     for i in range(0, coeff_sel_len, iter_size):
+    #         max_i = min(i + iter_size, coeff_sel_len)
+    #         coeff_sel_i = coeff_sel[i:max_i]
+    #         bin_vec = self._dec2bin(coeff_sel_i, self.num_sums).to(torch.int64)
+    #         bin_vec = \
+    #             bin_vec.transpose(0, 1).reshape(self.num_sums, -1, num_bits)
+    #         bvr_i = torch.sum(bin_vec * powers.unsqueeze(0), dim=2)
+    #         bvr[:, i//32:max_i//32] = bvr_i
+        
+    #     return bvr
     def _change_coeff_sel_to_bvr(self, coeff_sel):
         coeff_sel_len = self._get_padded_data_shape().numel()
         num_bits = self._get_bvr_num_bits()
-        bvr = torch.zeros((self.num_sums, (coeff_sel_len // num_bits)),
-                dtype=self.bvr_dtype, device=self.coeff_cache.device)
-        powers = 2 ** torch.arange(num_bits, dtype=torch.int64, 
-                                   device=self.coeff_cache.device)
+        bvr = torch.zeros(
+            (self.num_sums, (coeff_sel_len // num_bits)),
+            dtype=self.bvr_dtype,
+            device=self.coeff_cache.device
+        )
+        print(f"[DEBUG] coeff_sel_len={coeff_sel_len}, num_bits={num_bits}, bvr.shape={bvr.shape}")
+        
+        powers = 2 ** torch.arange(
+            num_bits,
+            dtype=torch.int64,
+            device=self.coeff_cache.device
+        )
+        print(f"[DEBUG] powers.shape={powers.shape}, values={powers[:min(len(powers),8)]}…")
+        
         iter_size = 65536
         for i in range(0, coeff_sel_len, iter_size):
             max_i = min(i + iter_size, coeff_sel_len)
             coeff_sel_i = coeff_sel[i:max_i]
+            
             bin_vec = self._dec2bin(coeff_sel_i, self.num_sums).to(torch.int64)
-            bin_vec = \
-                bin_vec.transpose(0, 1).reshape(self.num_sums, -1, num_bits)
+            
+            bin_vec = bin_vec.transpose(0, 1)
+            
+            bin_vec = bin_vec.reshape(self.num_sums, -1, num_bits)
+            
             bvr_i = torch.sum(bin_vec * powers.unsqueeze(0), dim=2)
-            bvr[:, i//32:max_i//32] = bvr_i
-        
+            
+            start = i // num_bits
+            end = max_i // num_bits
+            
+            bvr[:, start:end] = bvr_i
+            
+        print(f"[DEBUG] final bvr.shape={bvr.shape}")
         return bvr
+
      
     def _change_bvr_to_coeff_sel(self):
         coeff_sel_len = self._get_padded_data_shape().numel()
