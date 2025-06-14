@@ -1,4 +1,4 @@
-# torch==2.6.0
+torch==2.6.0
 transformers==4.51.3 #4.51.3. Temporarily change it to 4.47.1 to use awq
 datasets==3.4.1
 accelerate==1.6.0

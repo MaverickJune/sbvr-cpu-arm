@@ -5,8 +5,8 @@ import sbvr
 import copy
 import os
 
-import sbvr.sbvr_cuda
-import sbvr.sbvr_cpu
+# import sbvr.sbvr_cuda
+# import sbvr.sbvr_cpu
 
 out_dir = "data"
 os.makedirs(out_dir, exist_ok=True)
@@ -406,7 +406,7 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
 
 
 def sbvr_cpu_matmul_time_test(mat_len=512, sbvr_max_sums=4, 
-                          device=torch.device("cpu"), num_runs=10000):
+                          device=torch.device("cpu"), num_runs=1000):
     device = torch.device("cpu")
 
     mat_a_size = (1, mat_len)
@@ -437,6 +437,8 @@ def sbvr_cpu_matmul_time_test(mat_len=512, sbvr_max_sums=4,
         rhs_bvr = mat_b_sbvr.bvr
         rhs_coeff_idx = mat_b_sbvr.coeff_idx
         rhs_coeff_cache = mat_b_sbvr.coeff_cache
+
+        
         
         for _ in range(10):
             sbvr_matmul = sbvr._sbvr_cpu_mm_T(
@@ -570,7 +572,7 @@ if __name__ == "__main__":
     # sbvr_rd_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device, no_numsums_iter=True)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
     sbvr._sbvr_neon_test()
     sbvr_cpu_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=torch.device("cpu"))
     # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
