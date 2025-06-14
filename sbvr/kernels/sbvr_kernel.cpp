@@ -150,51 +150,42 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
         }
 
         // Now we should multiply the counts by the coefficients
+        alignas(16) __fp16 lane_tile[ RNumSums ][ N_LANE ];
 
         const int l_coeff_i = l_coeff_idx[bvr_idx];
+
         int r_coeff_i[N_LANE];
         for(int n = 0; n < N_LANE; n++) {
-            r_coeff_i[n] = r_coeff_idx[n * bvr_per_K + bvr_idx];
+            const __fp16* src = r_coeff_cache + r_coeff_i[n] * RNumSums;
+            for (int r = 0; r < RNumSums; ++r)
+                lane_tile[r][n] = src[r];
         }
-
-        const coeffs<LNumSums> l_coeffs = *(coeffs<LNumSums>*)(&l_coeff_cache[l_coeff_i * LNumSums]);
         
-        coeffs<RNumSums> r_coeffs_set[N_LANE];
-        for(int n = 0; n < N_LANE; n++) {
-            r_coeffs_set[n] = *reinterpret_cast<const coeffs<RNumSums>*>(&r_coeff_cache[r_coeff_i[n] * RNumSums]);
-        }
 
         for (int l = 0; l < LNumSums; ++l)
         {
-            float32_t a = static_cast<float>(l_coeffs.coeff[l]);
-            float32x4_t a_vec = vdupq_n_f32(a);
+            __fp16 a = static_cast<float>(l_coeff_cache[l_coeff_i * LNumSums + l]);
+            float16x8_t a_vec = vdupq_n_f16(a);
 
             for (int r = 0; r < RNumSums; ++r)
             {
-                float32x4_t b0123, b4567, b89AB, bCDEF;
-
-#define B_LOAD(lane) static_cast<float>(r_coeffs_set[lane].coeff[r])
-
-                b0123 = make_f32x4(B_LOAD(0), B_LOAD(1), B_LOAD(2), B_LOAD(3));
-                b4567 = make_f32x4(B_LOAD(4), B_LOAD(5), B_LOAD(6), B_LOAD(7));
-                b89AB = make_f32x4(B_LOAD(8), B_LOAD(9), B_LOAD(10), B_LOAD(11));
-                bCDEF = make_f32x4(B_LOAD(12), B_LOAD(13), B_LOAD(14), B_LOAD(15));
-#undef  B_LOAD
+                float16x8_t b0 = vld1q_f16(&lane_tile[r][0]);   // lane 0‥7
+                float16x8_t b1 = vld1q_f16(&lane_tile[r][8]);   // lane 8‥15
 
                 //  popc[l][r] 16lane → 4×uint32x4_t로 나눠 변환
                 uint8x16_t pc_u8 = popc_cache[l][r];
-                uint16x8_t pc16_low = vmovl_u8(vget_low_u8(pc_u8));   // lane 0‥7
-                uint16x8_t pc16_hi  = vmovl_u8(vget_high_u8(pc_u8));  // 8‥15
-                float32x4_t pc0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16 (pc16_low)));
-                float32x4_t pc1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(pc16_low)));
-                float32x4_t pc2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16 (pc16_hi )));
-                float32x4_t pc3 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(pc16_hi )));
+                float16x8_t pc0 = vcvtq_f16_u16( vmovl_u8(vget_low_u8 (pc_u8)) );
+                float16x8_t pc1 = vcvtq_f16_u16( vmovl_u8(vget_high_u8(pc_u8)) );
 
-                //  acc += (a*b) * pc
-                acc0 = vfmaq_f32(acc0, vmulq_f32(a_vec, b0123), pc0);
-                acc1 = vfmaq_f32(acc1, vmulq_f32(a_vec, b4567), pc1);
-                acc2 = vfmaq_f32(acc2, vmulq_f32(a_vec, b89AB), pc2);
-                acc3 = vfmaq_f32(acc3, vmulq_f32(a_vec, bCDEF), pc3);
+                float16x8_t ab0 = vmulq_f16(a_vec, b0);   // lanes 0‥7
+                float16x8_t ab1 = vmulq_f16(a_vec, b1);   // lanes 8‥15
+
+                // (2) FMLALQ: FP16 → FP32 누적
+                acc0 = vfmlalq_low_f16 (acc0, ab0, pc0);  // lanes 0‥3
+                acc1 = vfmlalq_high_f16(acc1, ab0, pc0);  // lanes 4‥7
+                acc2 = vfmlalq_low_f16 (acc2, ab1, pc1);  // lanes 8‥11
+                acc3 = vfmlalq_high_f16(acc3, ab1, pc1);  // lanes 12‥15
+
             }
         }
     }

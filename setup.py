@@ -48,6 +48,8 @@ setup(
                 'cxx': [
                     '-O3',
                     '-mcpu=native',
+                    '-ffast-math',
+                    '-mfpu=neon',
                 ],
             },
         ),
