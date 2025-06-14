@@ -3,11 +3,17 @@
 #include <cstdint>
 #include <assert.h>
 
-#include <pthread.h>
+#include <thread>
 #include <arm_neon.h>
 
 #define K_PER_BVR 32 // BVR size 256 and bvr_dtype is uint8_t, so 256/8 = 32
 #define N_LANE 16 // vcntq_u8 will process 16 lanes at a time
+
+typedef void (*KernelLaunchFn)(
+    uint8_t* l_bvr, void* l_coeff_idx, __fp16* l_coeff_cache,
+    uint8_t* r_bvr, void* r_coeff_idx, __fp16* r_coeff_cache,
+    __fp16* bias, __fp16* out,
+    int M, int N, int K, int num_threads);
 
 
 template <int NUM_SUMS>
@@ -15,12 +21,12 @@ struct coeffs;
 
 template <>
 struct coeffs<4> {
-    fp_t coeff[4];
+    __fp16 i[4];
 };
 
 template <>
 struct coeffs<8> {
-    fp_t coeff[8];
+    __fp16 i[8];
 };
 
 void sbvr_neon_test() {
@@ -37,6 +43,19 @@ void sbvr_neon_test() {
         std::cout << out[i] << " ";
     std::cout << std::endl;
 
+    // Check __FP16 support
+    __fp16 h = 1.0f; // Implicit conversion from float to __fp16
+    __fp16 h2 = 2.0f; // Another implicit conversion
+    float16x8_t h_vec = vdupq_n_f16(h);
+    float16x8_t h_vec2 = vdupq_n_f16(h2);
+    float16x8_t h_result = vfmaq_f16(h_vec, h_vec2, h_vec2); // h_vec + h_vec2
+    float16_t h_out[4];
+    vst1_f16(h_out, vget_low_f16(h_result)); // Store lower 4 elements
+    std::cout << "NEON __fp16 result: ";
+    for (int i = 0; i < 4; ++i)
+        std::cout << h_out[i] << " ";
+    std::cout << std::endl;
+
 #if defined(__ARM_FP16_FORMAT_IEEE)
     std::cout << "__ARM_FP16_FORMAT_IEEE is defined (IEEE fp16 supported)\n";
 #else
@@ -50,6 +69,11 @@ void sbvr_neon_test() {
 // #else
 //     std::cout << "__ARM_FEATURE_F16_SCALAR_ARITHMETIC is NOT defined\n";
 // #endif
+}
+
+inline float32x4_t make_f32x4(float a, float b, float c, float d) {
+    float tmp[4] = {a, b, c, d};
+    return vld1q_f32(tmp);
 }
 
 
@@ -95,8 +119,8 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
 
             for (int l_idx = 0; l_idx < LNumSums / 2; ++l_idx)    // (a0,a1)
             {
-                uint8_t  l0_b = l_bvr[(k*LNumSums + (l_idx*2    ))]; // single byte
-                uint8_t  l1_b = l_bvr[(k*LNumSums + (l_idx*2 +1))];
+                uint8_t  l0_b = l_bvr[(k_idx*LNumSums + (l_idx*2    ))]; // single byte
+                uint8_t  l1_b = l_bvr[(k_idx*LNumSums + (l_idx*2 +1))];
 
                 uint8x16_t l0 = vdupq_n_u8(l0_b);
                 uint8x16_t l1 = vdupq_n_u8(l1_b);
@@ -112,21 +136,15 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
                     uint8x16_t r0 = vld1q_u8(r_base     );
                     uint8x16_t r1 = vld1q_u8(r_base + 16);
 
-                    /* ------------------------------
-                    3. 네 가지 AND + vcnt
-                    ------------------------------ */
-                    uint8x16_t p00 = vcntq_u8( vandq_u8(l0, r0) );  // l0 & r0
-                    uint8x16_t p01 = vcntq_u8( vandq_u8(l0, r1) );  // l0 & r1
-                    uint8x16_t p10 = vcntq_u8( vandq_u8(l1, r0) );  // l1 & r0
-                    uint8x16_t p11 = vcntq_u8( vandq_u8(l1, r1) );  // l1 & r1
+                    const int li0 = l_idx*2;
+                    const int li1 = li0 + 1;
+                    const int rj0 = r_idx*2;
+                    const int rj1 = rj0 + 1;
 
-                    /* ------------------------------------------
-                    4. 8-bit 누적 (wrap-add, overflow 없음 가정)
-                    ------------------------------------------ */
-                    popc_cache[l_idx][r_idx] = vaddq_u8( popc_cache[l_idx][r_idx], p00 );
-                    popc_cache[l_idx][r_idx+1] = vaddq_u8( popc_cache[l_idx][r_idx+1], p01 );
-                    popc_cache[l_idx+1][r_idx] = vaddq_u8( popc_cache[l_idx+1][r_idx], p10 );
-                    popc_cache[l_idx+1][r_idx+1] = vaddq_u8( popc_cache[l_idx+1][r_idx+1], p11 );
+                    popc_cache[li0][rj0] = vaddq_u8(popc_cache[li0][rj0], vcntq_u8( vandq_u8(l0, r0) ));
+                    popc_cache[li0][rj1] = vaddq_u8(popc_cache[li0][rj1], vcntq_u8( vandq_u8(l0, r1) ));
+                    popc_cache[li1][rj0] = vaddq_u8(popc_cache[li1][rj0], vcntq_u8( vandq_u8(l1, r0) ));
+                    popc_cache[li1][rj1] = vaddq_u8(popc_cache[li1][rj1], vcntq_u8( vandq_u8(l1, r1) ));
                 }
             }
         }
@@ -134,7 +152,7 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
         // Now we should multiply the counts by the coefficients
 
         const int l_coeff_i = l_coeff_idx[bvr_idx];
-        const int r_coeff_i[N_LANE];
+        int r_coeff_i[N_LANE];
         for(int n = 0; n < N_LANE; n++) {
             r_coeff_i[n] = r_coeff_idx[n * bvr_per_K + bvr_idx];
         }
@@ -143,24 +161,24 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
         
         coeffs<RNumSums> r_coeffs_set[N_LANE];
         for(int n = 0; n < N_LANE; n++) {
-            r_coeffs_set[n] = *reinterpret_cast<const coeffs<LNumSums>*>(&r_coeff_cache[r_coeff_i[n] * RNumSums]);
+            r_coeffs_set[n] = *reinterpret_cast<const coeffs<RNumSums>*>(&r_coeff_cache[r_coeff_i[n] * RNumSums]);
         }
 
         for (int l = 0; l < LNumSums; ++l)
         {
-            float32_t a = vcvt_f32_f16(l_coeffs.coeff[l]);
+            float32_t a = static_cast<float>(l_coeffs.coeff[l]);
             float32x4_t a_vec = vdupq_n_f32(a);
 
             for (int r = 0; r < RNumSums; ++r)
             {
                 float32x4_t b0123, b4567, b89AB, bCDEF;
 
-#define B_LOAD(lane) vcvt_f32_f16(r_coeffs_set[lane].coeff[r])
+#define B_LOAD(lane) static_cast<float>(r_coeffs_set[lane].coeff[r])
 
-                b0123 = { B_LOAD(0),  B_LOAD(1),  B_LOAD(2),  B_LOAD(3)  };
-                b4567 = { B_LOAD(4),  B_LOAD(5),  B_LOAD(6),  B_LOAD(7)  };
-                b89AB = { B_LOAD(8),  B_LOAD(9),  B_LOAD(10), B_LOAD(11) };
-                bCDEF = { B_LOAD(12), B_LOAD(13), B_LOAD(14), B_LOAD(15) };
+                b0123 = make_f32x4(B_LOAD(0), B_LOAD(1), B_LOAD(2), B_LOAD(3));
+                b4567 = make_f32x4(B_LOAD(4), B_LOAD(5), B_LOAD(6), B_LOAD(7));
+                b89AB = make_f32x4(B_LOAD(8), B_LOAD(9), B_LOAD(10), B_LOAD(11));
+                bCDEF = make_f32x4(B_LOAD(12), B_LOAD(13), B_LOAD(14), B_LOAD(15));
 #undef  B_LOAD
 
                 //  popc[l][r] 16lane → 4×uint32x4_t로 나눠 변환
@@ -180,7 +198,6 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
             }
         }
     }
-
     // float -> __fp16 Conversion
     float16x8_t out_vec0 = vcombine_f16(
         vcvt_f16_f32(acc0),
@@ -209,21 +226,21 @@ template<
     typename  LIndexT, typename  RIndexT,
     int       LNumSums, int      RNumSums>
 struct WorkerArg {
-    const uint8_t* l_bvr;
-    const LIndexT* l_coeff_idx;
-    const __fp16*  l_coeff_cache;
+    uint8_t* l_bvr;                // (K, LNumSums)
+    void* l_coeff_idx;             // (K / K_PER_BVR, M)
+    __fp16* l_coeff_cache;         // (l_cache_size, LNumSums)
 
-    const uint8_t* r_bvr;          // 전체 배열
-    const RIndexT* r_coeff_idx;
-    const __fp16*  r_coeff_cache;
+    uint8_t* r_bvr;                // (N / N_LANE, K, RNumSums, N_LANE)
+    void* r_coeff_idx;             // (N, K / K_PER_BVR)
+    __fp16* r_coeff_cache;         // (r_cache_size, RNumSums)
 
-    const __fp16*  bias;
-    __fp16*        out;
+    __fp16* bias;                  // (N_LANE)
+    __fp16* out;                   // (N / N_LANE, N_LANE)
 
-    int K;
-    int N;              // 전체 열
-    int n_begin;        // [n_begin , n_end)
-    int n_end;
+    int K;                          // Number of features
+    int N;                          // Total number of output columns
+    int n_begin;                   // Start column index for this worker
+    int n_end;                     // End column index for this worker
 };
 
 template<
@@ -234,20 +251,33 @@ void* worker_fn(void* arg_void)
     using Arg = WorkerArg<LIndexT,RIndexT,LNumSums,RNumSums>;
     Arg* a = static_cast<Arg*>(arg_void);
 
-    const int N_PACK = a->N / N_LANE;
+    int bvr_per_K = a->K / K_PER_BVR; // Number of BVRs per K
+
+    int N_PACK = a->N / N_LANE; // Number of 16-lane packs
 
     for (int n_pack = a->n_begin / N_LANE; n_pack < a->n_end / N_LANE; ++n_pack)
     {
+
         const uint8_t* r_pack =
-              a->r_bvr + (n_pack * K * RNumSums * N_LANE);
+              a->r_bvr + (n_pack * a->K * RNumSums * N_LANE);
+
+        const RIndexT* r_coeff_idx =
+            (const RIndexT*)(a->r_coeff_idx) + n_pack * N_LANE * bvr_per_K;
 
         __fp16* out_pack = a->out  + n_pack * N_LANE;
         const __fp16* bias_pack = a->bias ? (a->bias + n_pack * N_LANE) : nullptr;
 
         simd_kernel_1x16<LIndexT,RIndexT,LNumSums,RNumSums>(
-            a->l_bvr, a->l_coeff_idx, a->l_coeff_cache,
-            r_pack, a->r_coeff_idx, a->r_coeff_cache,
+            a->l_bvr, (const LIndexT*)(a->l_coeff_idx), a->l_coeff_cache,
+            r_pack, r_coeff_idx, a->r_coeff_cache,
             bias_pack, out_pack, a->K);
+
+        if(n_pack == 0 && a->n_begin == 0) {
+            // First worker, write the results back to the output tensor
+            for (int n = 0; n < N_LANE; ++n) {
+                a->out[n] = out_pack[n];
+            }
+        } 
     }
 
     return nullptr;
@@ -259,23 +289,16 @@ void* worker_fn(void* arg_void)
 template<
     typename  LIndexT, typename  RIndexT,
     int       LNumSums, int      RNumSums>
-void sbvr_mm_cpu_1xN( const uint8_t*  l_bvr,
-                      const LIndexT*  l_coeff_idx,
-                      const __fp16*   l_coeff_cache,
-
-                      const uint8_t*  r_bvr,
-                      const RIndexT*  r_coeff_idx,
-                      const __fp16*   r_coeff_cache,
-
-                      const __fp16*   bias,
-                      __fp16*         out,
-                      int             K,
-                      int             N,
-                      int             num_threads = 8 )
+void sbvr_mm_cpu_1xN(
+    uint8_t* l_bvr, void* l_coeff_idx, __fp16* l_coeff_cache,
+    uint8_t* r_bvr, void* r_coeff_idx, __fp16* r_coeff_cache,
+    __fp16* bias, __fp16* out,
+    int M, int N, int K, int num_threads)
 {
 
-    std::vector<pthread_t>    tids(num_threads);
+    std::vector<std::thread> threads;
     std::vector<WorkerArg<LIndexT,RIndexT,LNumSums,RNumSums>> args(num_threads);
+    
 
     const int chunk = (N + num_threads - 1) / num_threads;
     for (int t = 0; t < num_threads; ++t)
@@ -283,51 +306,55 @@ void sbvr_mm_cpu_1xN( const uint8_t*  l_bvr,
         int n0 = t * chunk;
         int n1 = std::min(n0 + chunk, N);
 
-        args[t] = { l_bvr, l_coeff_idx, l_coeff_cache,
-                    r_bvr, r_coeff_idx, r_coeff_cache,
-                    bias,  out,
-                    K, N, n0, n1 };
-
-        pthread_create(&tids[t], nullptr, worker_fn<
-                        LIndexT,RIndexT,LNumSums,RNumSums>, &args[t]);
-    }
-
-    for (auto& tid : tids) pthread_join(tid, nullptr);
-}
-
-<template <typename LIndexT, typename RIndexT>
-void launch_cpu_sbvr_kernel_wrapper(
-    uint32_t* l_bvr, void* l_coeff_idx, __fp16* l_coeff_cache,
-    uint32_t* r_bvr, void* r_coeff_idx,__fp16* r_coeff_cache,
-    __fp16* bias, __fp16* out,
-    int M, int N, int K,
-    int l_num_sums, int r_num_sums,
-    int l_cache_size, int r_cache_size)
-    {
-        KernelLaunchFn kernel_list[] = {
-            // <LIndexT, RIndexT, LNumSums, RNumSums>
-            sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 4>,
-            sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 8>,
-            sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 4>,
-            sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 8>,
-        };
-        int kernel_idx = (l_num_sums / 4 - 1) * 2 + (r_num_sums / 4 - 1);
-
-        kernel_list[kernel_idx](
+        args[t] = {
             l_bvr, l_coeff_idx, l_coeff_cache,
             r_bvr, r_coeff_idx, r_coeff_cache,
             bias, out,
-            M, N, K,
-            device_id);
+            K, N, n0, n1
+        };
+
+        threads.emplace_back([&, t]() {
+            worker_fn<LIndexT, RIndexT, LNumSums, RNumSums>(&args[t]);
+        });
+
     }
 
-void launch_cpu_sbvr_mm_1xN(
-    uint32_t* l_bvr, void* l_coeff_idx, __fp16* l_coeff_cache,
-    uint32_t* r_bvr, void* r_coeff_idx,__fp16* r_coeff_cache,
+    for (auto& th : threads) th.join();
+}
+
+template <typename LIndexT, typename RIndexT>
+void launch_cpu_sbvr_kernel_wrapper(
+    uint8_t* l_bvr, void* l_coeff_idx, __fp16* l_coeff_cache,
+    uint8_t* r_bvr, void* r_coeff_idx,__fp16* r_coeff_cache,
     __fp16* bias, __fp16* out,
     int M, int N, int K,
     int l_num_sums, int r_num_sums,
-    int l_cache_size, int r_cache_size)
+    int l_cache_size, int r_cache_size, int num_threads)
+{
+    KernelLaunchFn kernel_list[] = {
+        // <LIndexT, RIndexT, LNumSums, RNumSums>
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 4>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 8>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 4>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 8>,
+    };
+    int kernel_idx = (l_num_sums / 4 - 1) * 2 + (r_num_sums / 4 - 1);
+
+    kernel_list[kernel_idx](
+        l_bvr, l_coeff_idx, l_coeff_cache,
+        r_bvr, r_coeff_idx, r_coeff_cache,
+        bias, out,
+        M, N, K, num_threads);
+        
+}
+
+void launch_cpu_sbvr_mm_1xN(
+    uint8_t* l_bvr, void* l_coeff_idx, __fp16* l_coeff_cache,
+    uint8_t* r_bvr, void* r_coeff_idx,__fp16* r_coeff_cache,
+    __fp16* bias, __fp16* out,
+    int M, int N, int K,
+    int l_num_sums, int r_num_sums,
+    int l_cache_size, int r_cache_size, int num_threads)
 {
     
     const bool use_l_uint8 = (l_cache_size <= 256);
@@ -348,7 +375,7 @@ void launch_cpu_sbvr_mm_1xN(
                 bias, out,
                 M, N, K,
                 l_num_sums, r_num_sums,
-                l_cache_size, r_cache_size);
+                l_cache_size, r_cache_size, num_threads);
         } else if (use_l_uint8 && !use_r_uint8) {
             // Use uint8_t for left BVR and uint16_t for right BVR
             launch_cpu_sbvr_kernel_wrapper<uint8_t, uint16_t>(
@@ -357,7 +384,7 @@ void launch_cpu_sbvr_mm_1xN(
                 bias, out,
                 M, N, K,
                 l_num_sums, r_num_sums,
-                l_cache_size, r_cache_size);
+                l_cache_size, r_cache_size, num_threads);
         } else if (!use_l_uint8 && use_r_uint8) {
             // Use uint16_t for left BVR and uint8_t for right BVR
             launch_cpu_sbvr_kernel_wrapper<uint16_t, uint8_t>(
@@ -366,7 +393,7 @@ void launch_cpu_sbvr_mm_1xN(
                 bias, out,
                 M, N, K,
                 l_num_sums, r_num_sums,
-                l_cache_size, r_cache_size);
+                l_cache_size, r_cache_size, num_threads);
         } else {
             // Use uint16_t for both left and right BVRs
             launch_cpu_sbvr_kernel_wrapper<uint16_t, uint16_t>(
@@ -375,7 +402,7 @@ void launch_cpu_sbvr_mm_1xN(
                 bias, out,
                 M, N, K,
                 l_num_sums, r_num_sums,
-                l_cache_size, r_cache_size);
+                l_cache_size, r_cache_size, num_threads);
         }
     } else {
         // To-Do : Naive implementation for other cases
@@ -409,11 +436,13 @@ torch::Tensor sbvr_cpu_mm_T(
 
     auto out = torch::empty({M, N},
                          torch::dtype(torch::kFloat16).device(l_bvr.device()));
-    __half* bias_ptr = nullptr;
+    __fp16* bias_ptr = nullptr;
     if (bias.size(0) == N)
-        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
-    
+        bias_ptr = reinterpret_cast<__fp16*>(bias.data_ptr<at::Half>());
 
+
+    int num_threads = std::thread::hardware_concurrency();
+    
     // Call the dispatch kernel
     launch_cpu_sbvr_mm_1xN(
         l_bvr.data_ptr<uint8_t>(),
@@ -426,7 +455,8 @@ torch::Tensor sbvr_cpu_mm_T(
         reinterpret_cast<__fp16*>(out.data_ptr<at::Half>()),
         M, N, K,
         l_num_sums, r_num_sums,
-        l_cache_size, r_cache_size);
+        l_cache_size, r_cache_size,
+        num_threads);
 
     return out;
 }
@@ -435,7 +465,7 @@ torch::Tensor sbvr_cpu_mm_T(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("_sbvr_neon_test", &sbvr_neon_test,
             "Simple NEON vector addition test");
-    m.def("sbvr_cpu_mm_T", &sbvr_cpu_mm_T,
+    m.def("_sbvr_cpu_mm_T", &sbvr_cpu_mm_T,
             "SBVR matrix multiplication on CPU with NEON support",
             py::arg("l_bvr"), py::arg("l_coeff_idx"), py::arg("l_coeff_cache"),
             py::arg("r_bvr"), py::arg("r_coeff_idx"), py::arg("r_coeff_cache"),

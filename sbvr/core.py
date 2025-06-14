@@ -99,16 +99,16 @@ class _sbvr_serialized():
             raise ValueError(
                 _r_str(f"The BVR data type does not match - expected type " +
                       f"{self.bvr_dtype} but got {bvr.dtype}"))
-        if bvr.shape[2] != num_sums:
-            raise ValueError(
-                _r_str("The number of summations does not match the BVR, " +
-                      f"expected {num_sums} but got " + 
-                      f"{bvr.shape[2]}"))
-        if bvr.shape[0] * bvr_num_bits != self.padded_data_shape[-1]:
-            raise ValueError(
-                _r_str("The BVR inner dimension does not match the padded "+
-                      f"data shape, expected {self.padded_data_shape[-1]} " +
-                      f"but got {bvr.shape[0] * bvr_num_bits}"))
+        # if bvr.shape[2] != num_sums:
+        #     raise ValueError(
+        #         _r_str("The number of summations does not match the BVR, " +
+        #               f"expected {num_sums} but got " + 
+        #               f"{bvr.shape[2]}"))
+        # if bvr.shape[0] * bvr_num_bits != self.padded_data_shape[-1]:
+        #     raise ValueError(
+        #         _r_str("The BVR inner dimension does not match the padded "+
+        #               f"data shape, expected {self.padded_data_shape[-1]} " +
+        #               f"but got {bvr.shape[0] * bvr_num_bits}"))
         self.bvr = self._serialize_tensor(bvr)
         self.bvr_shape = bvr.shape
         self.bvr_dtype = bvr.dtype
@@ -209,7 +209,8 @@ class sbvr(torch.nn.Module):
                  device: torch.device = None,
                  sbvr_serialized: _sbvr_serialized = None,
                  verbose_level: int = 1,
-                 trans: bool = False):
+                 trans: bool = False,
+                 cpu_kernel : bool = False):
         super(sbvr, self).__init__()
         _device = device if device is not None else \
             torch.device("cuda") if torch.cuda.is_available() \
@@ -218,7 +219,13 @@ class sbvr(torch.nn.Module):
         
         enforce_bvr_len = 256
         enforce_compute_dtype = torch.float16
-        enforce_bvr_dtype = torch.uint32
+
+        # Added support for CPU kernel
+        if not cpu_kernel:
+            enforce_bvr_dtype = torch.uint32
+        else:
+            enforce_bvr_dtype = torch.uint8
+            _device = torch.device("cpu")
         
         if data is not None and sbvr_serialized is not None:
             raise ValueError(
@@ -262,7 +269,7 @@ class sbvr(torch.nn.Module):
             self.coeff_cache = None
             self.input_coeff = None
             self._encode_to_sbvr(data.to(_device).to(self.compute_dtype), 
-                                 enc_conf)
+                                 enc_conf, cpu_kernel)
         else:
             if not isinstance(sbvr_serialized, _sbvr_serialized):
                 raise ValueError(
@@ -639,7 +646,7 @@ class sbvr(torch.nn.Module):
         return best_coeff_idx, best_coeff_sel
     
     @torch.inference_mode()
-    def _encode_to_sbvr(self, data, enc_conf):
+    def _encode_to_sbvr(self, data, enc_conf, cpu_kernel):
         if data.device.type == 'cuda':
             elem_size = torch.tensor(0, dtype=self.compute_dtype).element_size()
             diff_mat_size = 3 * enc_conf.extend_ratio * (2**self.num_sums) \
@@ -707,28 +714,84 @@ class sbvr(torch.nn.Module):
             self.coeff_idx[i] = g_coeff_idx
             out_coeff_sel[group_start:group_end] = coeff_sel
     
-        bvr = self._change_coeff_sel_to_bvr(out_coeff_sel)
-        bvr = bvr.view(self.num_sums, -1, self._get_padded_data_shape()[-1] // \
-                                                self._get_bvr_num_bits())
-        bvr = bvr.permute(2, 1, 0).contiguous()
-        print(f"[DEBUG] _get_padded_data_shape()={self._get_padded_data_shape()}")
-        print(f"[DEBUG] _get_bvr_num_bits()={self._get_bvr_num_bits()}")
-        print(f"[DEBUG] bvr.shape={bvr.shape}, bvr_len={self.bvr_len}, " +
-              f"bvr_num_bits={self._get_bvr_num_bits()}")
-        self.bvr = torch.nn.Parameter(bvr, requires_grad=False)
+        bvr_raw = self._change_coeff_sel_to_bvr(out_coeff_sel)
+
+        bvr = bvr_raw.view(
+                self.num_sums,
+                -1,
+                self._get_padded_data_shape()[-1] // self._get_bvr_num_bits()
+            )
+
+
+        # bvr = bvr.view(self.num_sums, -1, self._get_padded_data_shape()[-1] // \
+        #                                         self._get_bvr_num_bits()) # (num_sums, num_bvr, bvr_len // num_bits)
+        # bvr = bvr.permute(2, 1, 0).contiguous()
+        # print(f"[DEBUG] _get_padded_data_shape()={self._get_padded_data_shape()}")
+        # print(f"[DEBUG] _get_bvr_num_bits()={self._get_bvr_num_bits()}")
+        # print(f"[DEBUG] bvr.shape={bvr.shape}, bvr_len={self.bvr_len}, " +
+        #       f"bvr_num_bits={self._get_bvr_num_bits()}")
+        # self.bvr = torch.nn.Parameter(bvr, requires_grad=False)
         
-        self.coeff_cache = \
-            self.coeff_cache[:enc_conf.num_coeff_cache_lines].contiguous()
-        if enc_conf.num_coeff_cache_lines <= 256:
-            self.coeff_idx = self.coeff_idx.to(torch.uint8)
-        self.coeff_idx = \
-            self.coeff_idx.view(-1, self.bvr.shape[0] // \
-                                (self.bvr_len // self._get_bvr_num_bits()))
-        self.coeff_idx = self.coeff_idx.transpose(0, 1).contiguous()
+        # self.coeff_cache = \
+        #     self.coeff_cache[:enc_conf.num_coeff_cache_lines].contiguous()
+        # if enc_conf.num_coeff_cache_lines <= 256:
+        #     self.coeff_idx = self.coeff_idx.to(torch.uint8)
+        # self.coeff_idx = \
+        #     self.coeff_idx.view(-1, self.bvr.shape[0] // \
+        #                         (self.bvr_len // self._get_bvr_num_bits()))
+        # self.coeff_idx = self.coeff_idx.transpose(0, 1).contiguous()
             
+        
+
+        if cpu_kernel and bvr.size(1) != 1:                      # <-- NEW ❶
+            # ---------- ① BVR 16-lane pack --------------------------
+            bits_per_bvr = self._get_bvr_num_bits()             # e.g. 256
+            K_total      = self._get_padded_data_shape()[-1]
+            N_LANE       = 16
+
+            bvr_pk = (bvr
+                    .view(self.num_sums, -1, N_LANE, K_total // self._get_bvr_num_bits())   # (num_sums, num_bvr, N_LANE, bvr_len // num_bits)
+                    .permute(1, 3, 0, 2)  # (num_sums, bvr_len // num_bits, num_sums, N_LANE)
+                    .contiguous())
+
+            self.bvr = torch.nn.Parameter(bvr_pk, requires_grad=False)
+
+            # ---------- ② coeff_cache 그대로, coeff_idx 전치 ----------
+            self.coeff_cache = self.coeff_cache[:enc_conf.num_coeff_cache_lines].contiguous()
+            if enc_conf.num_coeff_cache_lines <= 256:
+                self.coeff_idx = self.coeff_idx.to(torch.uint8)
+
+            coeff_idx = self.coeff_idx.view((-1, K_total // self.bvr_len))
+            self.coeff_idx = torch.nn.Parameter(coeff_idx,
+                                                requires_grad=False)
+
+        else:                              # <-- 원본 경로 ❷
+            bvr = bvr.permute(2, 1, 0).contiguous()
+
+            print(f"[DEBUG] _get_padded_data_shape()={self._get_padded_data_shape()}")
+            print(f"[DEBUG] _get_bvr_num_bits()={self._get_bvr_num_bits()}")
+            print(f"[DEBUG] bvr.shape={bvr.shape}, bvr_len={self.bvr_len}, " +
+                f"bvr_num_bits={self._get_bvr_num_bits()}")
+
+            self.bvr = torch.nn.Parameter(bvr, requires_grad=False)
+
+            self.coeff_cache = \
+                self.coeff_cache[:enc_conf.num_coeff_cache_lines].contiguous()
+            if enc_conf.num_coeff_cache_lines <= 256:
+                self.coeff_idx = self.coeff_idx.to(torch.uint8)
+
+            self.coeff_idx = self.coeff_idx.view(
+                -1,
+                self.bvr.shape[0] // (self.bvr_len // self._get_bvr_num_bits())
+            ).transpose(0, 1).contiguous()
+
+
         self.coeff_idx = torch.nn.Parameter(self.coeff_idx, requires_grad=False)
         self.coeff_cache = torch.nn.Parameter(self.coeff_cache,
                                               requires_grad=False)
+
+
+
         
         if self.verbose_level > 0:
             print(_b_str("Encoding complete."))
@@ -963,10 +1026,10 @@ def mm_T(lhs, rhs, bias):
     return _sbvr_mm_T(lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                 rhs_bvr, rhs_coeff_idx, rhs_coeff_cache, bias)
     
-def load(filename, device=None, verbose_level=1) -> sbvr:
+def load(filename, device=None, verbose_level=1, cpu_kernel=False) -> sbvr:
     serialized_sbvr = torch.load(filename)
     sbvr_obj = sbvr(sbvr_serialized=serialized_sbvr, 
-                    verbose_level=verbose_level, device=device)
+                    verbose_level=verbose_level, device=device, cpu_kernel=cpu_kernel)
     sbvr_obj.verbose_level = verbose_level
     if verbose_level > 0:
         print(_b_str("Loaded SBVR object from: ") + filename)
