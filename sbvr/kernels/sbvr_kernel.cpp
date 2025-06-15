@@ -154,7 +154,7 @@ simd_kernel_1xN_no_fhm( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
                     for (int r_idx = 0; r_idx < RNumSums / 2; ++r_idx) // (b0,b1)
                     {
                         const uint8_t *r_base =
-                            &r_bvr[(k_idx * RNumSums + (r_idx * 2)) * 16]; // 16-lane base
+                            &r_bvr[n * K * RNumSums + (k_idx * RNumSums + (r_idx * 2)) * 16]; // 16-lane base
 
                         uint8x16_t r0 = vld1q_u8(r_base     );
                         uint8x16_t r1 = vld1q_u8(r_base + 16);
@@ -176,15 +176,15 @@ simd_kernel_1xN_no_fhm( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
 
             const int l_coeff_i = l_coeff_idx[bvr_idx];
             int r_coeff_i[N_LANE];
-            for(int n = 0; n < N_LANE; n++) {
-                r_coeff_i[n] = r_coeff_idx[n * bvr_per_K + bvr_idx];
+            for(int nn = 0; nn < N_LANE; nn++) {
+                r_coeff_i[nn] = r_coeff_idx[(n + nn) * bvr_per_K + bvr_idx];
             }
 
             const coeffs<LNumSums> l_coeffs = *(coeffs<LNumSums>*)(&l_coeff_cache[l_coeff_i * LNumSums]);
             
             coeffs<RNumSums> r_coeffs_set[N_LANE];
-            for(int n = 0; n < N_LANE; n++) {
-                r_coeffs_set[n] = *reinterpret_cast<const coeffs<RNumSums>*>(&r_coeff_cache[r_coeff_i[n] * RNumSums]);
+            for(int nn = 0; nn < N_LANE; nn++) {
+                r_coeffs_set[nn] = *reinterpret_cast<const coeffs<RNumSums>*>(&r_coeff_cache[r_coeff_i[nn] * RNumSums]);
             }
 
             for (int l = 0; l < LNumSums; ++l)
@@ -233,14 +233,14 @@ simd_kernel_1xN_no_fhm( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
 
         // if bias is provided, add it
         if (bias_pack) {
-            float16x8_t bias_vec_0 = vld1q_f16(bias_pack);
-            float16x8_t bias_vec_1 = vld1q_f16(bias_pack + 8);
+            float16x8_t bias_vec_0 = vld1q_f16(bias_pack + n);
+            float16x8_t bias_vec_1 = vld1q_f16(bias_pack + n + 8);
             out_vec0 = vaddq_f16(out_vec0, bias_vec_0);
             out_vec1 = vaddq_f16(out_vec1, bias_vec_1);
         }
         
-        vst1q_f16(out_pack, out_vec0);
-        vst1q_f16(out_pack + 8, out_vec1);
+        vst1q_f16(out_pack + n, out_vec0);
+        vst1q_f16(out_pack + n + 8, out_vec1);
 
     }
 }
@@ -285,12 +285,15 @@ simd_kernel_1xN_popc_first( const uint8_t* __restrict l_bvr,        // (K, LNumS
             const int l_coeff_i = l_coeff_idx[bvr_idx];
 
             for(int nn = 0; nn < N_LANE; ++nn) {
-                const __fp16* src = r_coeff_cache + r_coeff_idx[nn * bvr_per_K + bvr_idx] * RNumSums;
+                const int r_coeff_i = r_coeff_idx[(n + nn) * bvr_per_K + bvr_idx];
+                const __fp16* src = r_coeff_cache + r_coeff_i * RNumSums;
                 for (int r = 0; r < RNumSums; ++r)
                     lane_tile[r][nn] = src[r];
             }
 
-            memset(popc_cache, 0, sizeof popc_cache);
+            for (int l = 0; l < LNumSums; ++l)
+                for (int r = 0; r < RNumSums; ++r)
+                    popc_cache[l][r] = vdupq_n_u8(0);
 
 
             for (int k = 0; k < K_PER_BVR; ++k)
@@ -308,8 +311,7 @@ simd_kernel_1xN_popc_first( const uint8_t* __restrict l_bvr,        // (K, LNumS
                     for (int r_idx = 0; r_idx < RNumSums / 2; ++r_idx) // (b0,b1)
                     {
                         const uint8_t *r_base =
-                            &r_bvr[(k_idx * RNumSums + (r_idx * 2)) * 16]; // 16-lane base
-
+                            &r_bvr[n * K * RNumSums + (k_idx * RNumSums + (r_idx * 2)) * 16]; // 16-lane base
                         uint8x16_t r0 = vld1q_u8(r_base     );
                         uint8x16_t r1 = vld1q_u8(r_base + 16);
 
@@ -384,14 +386,14 @@ simd_kernel_1xN_popc_first( const uint8_t* __restrict l_bvr,        // (K, LNumS
 
         // if bias is provided, add it
         if (bias_pack) {
-            float16x8_t bias_vec_0 = vld1q_f16(bias_pack);
-            float16x8_t bias_vec_1 = vld1q_f16(bias_pack + 8);
+            float16x8_t bias_vec_0 = vld1q_f16(bias_pack + n);
+            float16x8_t bias_vec_1 = vld1q_f16(bias_pack + n + 8);
             out_vec0 = vaddq_f16(out_vec0, bias_vec_0);
             out_vec1 = vaddq_f16(out_vec1, bias_vec_1);
         }
         
-        vst1q_f16(out_pack, out_vec0);
-        vst1q_f16(out_pack + 8, out_vec1);
+        vst1q_f16(out_pack + n, out_vec0);
+        vst1q_f16(out_pack + n + 8, out_vec1);
     }
 
 }
@@ -478,7 +480,7 @@ void sbvr_mm_cpu_1xN(
     const int chunk = (N + num_threads - 1) / num_threads;
     std::vector<WorkerArg<LIndexT,RIndexT,LNumSums,RNumSums>> args;
 
-    const int     bvr_per_K = K / K_PER_BVR;
+    const int bvr_per_K = K / K_PER_BVR;
 
     int n_tasks = 0;
     for (int t = 0; t < num_threads; ++t) {
@@ -486,12 +488,20 @@ void sbvr_mm_cpu_1xN(
         int n1 = std::min(n0 + chunk, N);
         if (n0 >= n1) break;
 
+
         uint8_t* r_pack = r_bvr + n0 * K * RNumSums;
-        const RIndexT* r_coeff_idx_pack = (const RIndexT*)r_coeff_idx + n0 * bvr_per_K;
+
+        RIndexT* r_coeff_idx_pack = (RIndexT*)r_coeff_idx + n0 * bvr_per_K;
+
         __fp16* out_pack = out + n0;
         __fp16* bias_pack = bias ? bias + n0 : nullptr;
 
         int n_items = n1 - n0;
+
+        if (n_items % N_LANE != 0) {
+            std::cerr << "Error: N must be a multiple of " << N_LANE << std::endl;
+            throw std::runtime_error("Invalid N value");
+        }
 
         args.push_back({
             l_bvr,
