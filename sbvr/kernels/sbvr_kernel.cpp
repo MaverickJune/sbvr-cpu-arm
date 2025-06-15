@@ -36,16 +36,8 @@ typedef void (*KernelLaunchFn)(
 
 
 template <int NUM_SUMS>
-struct coeffs;
-
-template <>
-struct coeffs<4> {
-    __fp16 i[4];
-};
-
-template <>
-struct coeffs<8> {
-    __fp16 i[8];
+struct coeffs {
+    __fp16 i[NUM_SUMS];
 };
 
 void sbvr_neon_test() {
@@ -95,7 +87,7 @@ template<
     typename  LIndexT, typename  RIndexT,
     int       LNumSums, int      RNumSums>
 inline void
-simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
+simd_kernel_1x16_no_fml( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
                   const LIndexT* __restrict l_coeff_idx,
                   const __fp16* __restrict l_coeff_cache,
 
@@ -110,140 +102,125 @@ simd_kernel_1x16( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
 
     const int bvr_per_K = K / K_PER_BVR; //
 
-    float32x4_t acc[RNumSums][4];
-    for (int r=0;r<RNumSums;++r)
-        for (int q=0;q<4;++q)
-            acc[r][q] = vdupq_n_f32(0.f);
+    float32x4_t acc0 = vdupq_n_f32(0.f);
+    float32x4_t acc1 = vdupq_n_f32(0.f);
+    float32x4_t acc2 = vdupq_n_f32(0.f);
+    float32x4_t acc3 = vdupq_n_f32(0.f);
 
     for(int bvr_idx = 0; bvr_idx < bvr_per_K; ++bvr_idx)
     {
 
-        const int l_coeff_i = l_coeff_idx[bvr_idx];
+        // If all bits of l_bvr and r_bvr are set, this may overflow.
+        uint8x16_t popc_cache[LNumSums][RNumSums];
+        for (int lp = 0; lp < LNumSums; ++lp)
+            for (int rp = 0; rp < RNumSums; ++rp)
+                popc_cache[lp][rp] = vdupq_n_u8(0);
 
+        for (int k = 0; k < K_PER_BVR; ++k)
+        {
+            const int k_idx = bvr_idx * K_PER_BVR + k;
+
+            for (int l_idx = 0; l_idx < LNumSums / 2; ++l_idx)    // (a0,a1)
+            {
+                uint8_t  l0_b = l_bvr[(k_idx*LNumSums + (l_idx*2    ))]; // single byte
+                uint8_t  l1_b = l_bvr[(k_idx*LNumSums + (l_idx*2 +1))];
+
+                uint8x16_t l0 = vdupq_n_u8(l0_b);
+                uint8x16_t l1 = vdupq_n_u8(l1_b);
+
+                /* --------------------------------------------
+                2.  R 쪽 대응 두 장  →  16-lane vector 로드
+                -------------------------------------------- */
+                for (int r_idx = 0; r_idx < RNumSums / 2; ++r_idx) // (b0,b1)
+                {
+                    const uint8_t *r_base =
+                        &r_bvr[(k_idx * RNumSums + (r_idx * 2)) * 16]; // 16-lane base
+
+                    uint8x16_t r0 = vld1q_u8(r_base     );
+                    uint8x16_t r1 = vld1q_u8(r_base + 16);
+
+                    const int li0 = l_idx*2;
+                    const int li1 = li0 + 1;
+                    const int rj0 = r_idx*2;
+                    const int rj1 = rj0 + 1;
+
+                    popc_cache[li0][rj0] = vaddq_u8(popc_cache[li0][rj0], vcntq_u8( vandq_u8(l0, r0) ));
+                    popc_cache[li0][rj1] = vaddq_u8(popc_cache[li0][rj1], vcntq_u8( vandq_u8(l0, r1) ));
+                    popc_cache[li1][rj0] = vaddq_u8(popc_cache[li1][rj0], vcntq_u8( vandq_u8(l1, r0) ));
+                    popc_cache[li1][rj1] = vaddq_u8(popc_cache[li1][rj1], vcntq_u8( vandq_u8(l1, r1) ));
+                }
+            }
+        }
+
+        // Now we should multiply the counts by the coefficients
+
+        const int l_coeff_i = l_coeff_idx[bvr_idx];
         int r_coeff_i[N_LANE];
         for(int n = 0; n < N_LANE; n++) {
             r_coeff_i[n] = r_coeff_idx[n * bvr_per_K + bvr_idx];
         }
 
-        // ➊  a_vec[l]  :  FP16 8-lane 복제 (l 고정)
-        float16x8_t a_vec[LNumSums];
-        for (int l = 0; l < LNumSums; ++l) {
-            __fp16 a = l_coeff_cache[l_coeff_i * LNumSums + l];
-            a_vec[l] = vdupq_n_f16(a);                    // 8×복제
+        const coeffs<LNumSums> l_coeffs = *(coeffs<LNumSums>*)(&l_coeff_cache[l_coeff_i * LNumSums]);
+        
+        coeffs<RNumSums> r_coeffs_set[N_LANE];
+        for(int n = 0; n < N_LANE; n++) {
+            r_coeffs_set[n] = *reinterpret_cast<const coeffs<RNumSums>*>(&r_coeff_cache[r_coeff_i[n] * RNumSums]);
         }
 
-        // ➋  lane_tile[r][n] :  SoA 복사 (bvr_idx당 1회)
-        alignas(16) __fp16 lane_tile[RNumSums][N_LANE];
-        for (int n = 0; n < N_LANE; ++n) {
-            const __fp16* src = r_coeff_cache + r_coeff_i[n] * RNumSums;
-        #pragma unroll
+        for (int l = 0; l < LNumSums; ++l)
+        {
+            float32_t a = static_cast<float>(l_coeffs.i[l]);
+            float32x4_t a_vec = vdupq_n_f32(a);
+
             for (int r = 0; r < RNumSums; ++r)
-                lane_tile[r][n] = src[r];
-        }
+            {
+                float32x4_t b0123, b4567, b89AB, bCDEF;
 
-        // ➌  b_vec[r][2] :  FP16 16-lane (0‥7, 8‥15)
-        float16x8_t b_vec[RNumSums][2];
-        for (int r = 0; r < RNumSums; ++r) {
-            b_vec[r][0] = vld1q_f16(&lane_tile[r][0]);   // lane 0‥7
-            b_vec[r][1] = vld1q_f16(&lane_tile[r][8]);   // lane 8‥15
-        }
+#define B_LOAD(lane) static_cast<float>(r_coeffs_set[lane].i[r])
 
+                b0123 = make_f32x4(B_LOAD(0), B_LOAD(1), B_LOAD(2), B_LOAD(3));
+                b4567 = make_f32x4(B_LOAD(4), B_LOAD(5), B_LOAD(6), B_LOAD(7));
+                b89AB = make_f32x4(B_LOAD(8), B_LOAD(9), B_LOAD(10), B_LOAD(11));
+                bCDEF = make_f32x4(B_LOAD(12), B_LOAD(13), B_LOAD(14), B_LOAD(15));
+#undef  B_LOAD
 
-        for (int k = 0; k < K_PER_BVR; ++k) {
-            const int k_idx = bvr_idx * K_PER_BVR + k;
+                //  popc[l][r] 16lane → 4×uint32x4_t로 나눠 변환
+                uint8x16_t pc_u8 = popc_cache[l][r];
+                uint16x8_t pc16_low = vmovl_u8(vget_low_u8(pc_u8));   // lane 0‥7
+                uint16x8_t pc16_hi  = vmovl_u8(vget_high_u8(pc_u8));  // 8‥15
+                float32x4_t pc0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16 (pc16_low)));
+                float32x4_t pc1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(pc16_low)));
+                float32x4_t pc2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16 (pc16_hi )));
+                float32x4_t pc3 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(pc16_hi )));
 
-        #pragma unroll( LNumSums / 2 )
-            for (int l_pair = 0; l_pair < LNumSums; l_pair += 2) {
-
-                uint8_t  l0_b = l_bvr[(k_idx*LNumSums +  l_pair    )];
-                uint8_t  l1_b = l_bvr[(k_idx*LNumSums + (l_pair+1))];
-
-                uint8x16_t l0 = vdupq_n_u8(l0_b);
-                uint8x16_t l1 = vdupq_n_u8(l1_b);
-
-        #pragma unroll( RNumSums / 2 )
-                for (int r_pair = 0; r_pair < RNumSums; r_pair += 2) {
-
-                    const uint8_t* r_base =
-                        &r_bvr[(k_idx * RNumSums + r_pair) * 16];
-
-                    uint8x16_t r0 = vld1q_u8(r_base);
-                    uint8x16_t r1 = vld1q_u8(r_base + 16);
-
-                    uint8x16_t pc00 = vcntq_u8(vandq_u8(l0, r0));
-                    uint8x16_t pc01 = vcntq_u8(vandq_u8(l0, r1));
-
-                    float16x8_t pc00l = vcvtq_f16_u16(vmovl_u8(vget_low_u8 (pc00)));
-                    float16x8_t pc00h = vcvtq_f16_u16(vmovl_u8(vget_high_u8(pc00)));
-
-                    float16x8_t pc01l = vcvtq_f16_u16(vmovl_u8(vget_low_u8 (pc01)));
-                    float16x8_t pc01h = vcvtq_f16_u16(vmovl_u8(vget_high_u8(pc01)));
-
-                    // FMLAL : acc[r_pair + 0] ← l_pair × r_pair
-                    float16x8_t ab00 = vmulq_f16(a_vec[l_pair], b_vec[r_pair][0]);
-                    acc[r_pair][0] = vfmlalq_low_f16 (acc[r_pair][0], ab00, pc00l);
-                    acc[r_pair][1] = vfmlalq_high_f16(acc[r_pair][1], ab00, pc00l);
-                    acc[r_pair][2] = vfmlalq_low_f16 (acc[r_pair][2], ab00, pc00h);
-                    acc[r_pair][3] = vfmlalq_high_f16(acc[r_pair][3], ab00, pc00h);
-
-                    // (l0, r1)
-                    float16x8_t ab01 = vmulq_f16(a_vec[l_pair], b_vec[r_pair+1][0]);
-                    acc[r_pair+1][0] = vfmlalq_low_f16 (acc[r_pair+1][0], ab01, pc01l);
-                    acc[r_pair+1][1] = vfmlalq_high_f16(acc[r_pair+1][1], ab01, pc01l);
-                    acc[r_pair+1][2] = vfmlalq_low_f16 (acc[r_pair+1][2], ab01, pc01h);
-                    acc[r_pair+1][3] = vfmlalq_high_f16(acc[r_pair+1][3], ab01, pc01h);
-
-                    uint8x16_t pc10 = vcntq_u8(vandq_u8(l1, r0));
-                    uint8x16_t pc11 = vcntq_u8(vandq_u8(l1, r1));
-
-                    float16x8_t pc10l = vcvtq_f16_u16(vmovl_u8(vget_low_u8 (pc10)));
-                    float16x8_t pc10h = vcvtq_f16_u16(vmovl_u8(vget_high_u8(pc10)));
-
-                    float16x8_t pc11l = vcvtq_f16_u16(vmovl_u8(vget_low_u8 (pc11)));
-                    float16x8_t pc11h = vcvtq_f16_u16(vmovl_u8(vget_high_u8(pc11)));
-
-                    // FMLAL : acc[r_pair + 0] ← l_pair × r_pair
-                    float16x8_t ab10 = vmulq_f16(a_vec[l_pair+1], b_vec[r_pair][0]);
-                    acc[r_pair][0] = vfmlalq_low_f16 (acc[r_pair][0], ab10, pc10l);
-                    acc[r_pair][1] = vfmlalq_high_f16(acc[r_pair][1], ab10, pc10l);
-                    acc[r_pair][2] = vfmlalq_low_f16 (acc[r_pair][2], ab10, pc10h);
-                    acc[r_pair][3] = vfmlalq_high_f16(acc[r_pair][3], ab10, pc10h);
-                    // (l1, r1)
-                    float16x8_t ab11 = vmulq_f16(a_vec[l_pair+1], b_vec[r_pair+1][0]);
-                    acc[r_pair+1][0] = vfmlalq_low_f16 (acc[r_pair+1][0], ab11, pc11l);
-                    acc[r_pair+1][1] = vfmlalq_high_f16(acc[r_pair+1][1], ab11, pc11l);
-                    acc[r_pair+1][2] = vfmlalq_low_f16 (acc[r_pair+1][2], ab11, pc11h);
-                    acc[r_pair+1][3] = vfmlalq_high_f16(acc[r_pair+1][3], ab11, pc11h);
-                }
+                //  acc += (a*b) * pc
+                acc0 = vfmaq_f32(acc0, vmulq_f32(a_vec, b0123), pc0);
+                acc1 = vfmaq_f32(acc1, vmulq_f32(a_vec, b4567), pc1);
+                acc2 = vfmaq_f32(acc2, vmulq_f32(a_vec, b89AB), pc2);
+                acc3 = vfmaq_f32(acc3, vmulq_f32(a_vec, bCDEF), pc3);
             }
         }
     }
+    // float -> __fp16 Conversion
+    float16x8_t out_vec0 = vcombine_f16(
+        vcvt_f16_f32(acc0),
+        vcvt_f16_f32(acc1)
+    );
+    float16x8_t out_vec1 = vcombine_f16(
+        vcvt_f16_f32(acc2),
+        vcvt_f16_f32(acc3)
+    );
 
-    float32x4_t acc_merged[4] = { vdupq_n_f32(0.f), vdupq_n_f32(0.f),
-                                vdupq_n_f32(0.f), vdupq_n_f32(0.f) };
-
-    for (int r = 0; r < RNumSums; ++r) {
-        #pragma unroll
-        for (int q = 0; q < 4; ++q)
-            acc_merged[q] = vaddq_f32(acc_merged[q], acc[r][q]);   // 누적
-    }
-
-    // FP32→FP16 변환
-    float16x8_t out0 = vcombine_f16(
-            vcvt_f16_f32(acc_merged[0]),
-            vcvt_f16_f32(acc_merged[1]));
-    float16x8_t out1 = vcombine_f16(
-            vcvt_f16_f32(acc_merged[2]),
-            vcvt_f16_f32(acc_merged[3]));
-
-    // bias & store (버퍼 크기 = N_LANE)
+    // if bias is provided, add it
     if (bias_pack) {
-        float16x8_t bias0 = vld1q_f16(bias_pack);
-        float16x8_t bias1 = vld1q_f16(bias_pack + 8);
-        out0 = vaddq_f16(out0, bias0);
-        out1 = vaddq_f16(out1, bias1);
+        float16x8_t bias_vec_0 = vld1q_f16(bias_pack);
+        float16x8_t bias_vec_1 = vld1q_f16(bias_pack + 8);
+        out_vec0 = vaddq_f16(out_vec0, bias_vec_0);
+        out_vec1 = vaddq_f16(out_vec1, bias_vec_1);
     }
-    vst1q_f16_x2(out_pack, (float16x8x2_t){out0, out1});
+    
+    vst1q_f16(out_pack, out_vec0);
+    vst1q_f16(out_pack + 8, out_vec1);
 
 }
 
@@ -427,8 +404,9 @@ inline void worker_fn(const WorkerArg<LIndexT, RIndexT, LNumSums, RNumSums>* __r
     const int stride_coeff_pack  = LANES * bvr_per_K;           // elements
     const int stride_out_pack    = LANES;                       // __fp16 elements
 
-    const int pack_begin         = a->n_begin >> 4;    // /16
-    const int pack_end           = a->n_end   >> 4;    // /16
+
+    const int pack_begin         = a->n_begin / LANES;    // /16
+    const int pack_end           = a->n_end   / LANES;    // /16
 
     const uint8_t*       r_pack      = a->r_bvr        + pack_begin * stride_r_pack;
     const RIndexT*       r_coeff_idx = (const RIndexT*)a->r_coeff_idx + pack_begin * stride_coeff_pack;
@@ -501,13 +479,33 @@ void launch_cpu_sbvr_kernel_wrapper(
 {
     KernelLaunchFn kernel_list[] = {
         // <LIndexT, RIndexT, LNumSums, RNumSums>
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 2, 2>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 2, 4>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 2, 6>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 2, 8>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 2, 10>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 2>,
         sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 4>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 6>,
         sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 8>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 4, 10>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 2>,
         sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 4>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 6>,
         sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 8>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 8, 10>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 10, 2>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 10, 4>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 10, 6>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 10, 8>,
+        sbvr_mm_cpu_1xN<LIndexT, RIndexT, 10, 10>,
     };
-    int kernel_idx = (l_num_sums / 4 - 1) * 2 + (r_num_sums / 4 - 1);
-
+    int kernel_idx = (l_num_sums - 2)/2 * 5 + (r_num_sums - 2)/2;
+    if (kernel_idx < 0 || kernel_idx > 25)
+    {
+        std::cerr << "Invalid kernel index: " << kernel_idx << std::endl;
+        throw std::runtime_error("Invalid kernel index");
+    }
     kernel_list[kernel_idx](
         l_bvr, l_coeff_idx, l_coeff_cache,
         r_bvr, r_coeff_idx, r_coeff_cache,
@@ -530,8 +528,9 @@ void launch_cpu_sbvr_mm_1xN(
 
     // Each num_sums must be 4 or 8
     const bool supported_num_sums = 
-        (l_num_sums == 4 || l_num_sums == 8) &&
-        (r_num_sums == 4 || r_num_sums == 8);
+        (l_num_sums % 2 == 0 && r_num_sums % 2 == 0) &&
+        (l_num_sums >= 2 && l_num_sums <= 10) &&
+        (r_num_sums >= 2 && r_num_sums <= 10);
 
     
     if (supported_num_sums && use_l_uint8 && use_r_uint8) {

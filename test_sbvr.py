@@ -360,6 +360,8 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
     torch.cuda.synchronize()
     f16_time = (time.perf_counter() - time_start) / num_runs
 
+    print(y_str("f16_time: ") + f"{f16_time*10e6:.4f} usecs")
+
     sbvr_time = {}
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
@@ -438,8 +440,6 @@ def sbvr_cpu_matmul_time_test(mat_len=512, sbvr_max_sums=4,
         rhs_coeff_idx = mat_b_sbvr.coeff_idx
         rhs_coeff_cache = mat_b_sbvr.coeff_cache
 
-        
-        
         for _ in range(10):
             sbvr_matmul = sbvr._sbvr_cpu_mm_T(
                                     lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
@@ -462,8 +462,6 @@ def sbvr_cpu_matmul_time_test(mat_len=512, sbvr_max_sums=4,
     for i, (key, value) in enumerate(sbvr_dict.items()):
         print(b_str(f"Case {i+1}: f16 matmul vs SBVR {key} bits"))
         if value is not None:
-            print("f16_matmul data[0]: ", f16_matmul.data[0])
-            print("sbvr_matmul data[0]: ", value.data[0])
             print_errors(f16_matmul, value)
         print(y_str("\tMatmul time taken: ") 
               + f"{sbvr_time[key]*10e6:.4f} usecs"
