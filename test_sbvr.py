@@ -406,7 +406,7 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
 
 
 def sbvr_cpu_matmul_time_test(mat_len=512, sbvr_max_sums=4, 
-                          device=torch.device("cpu"), num_runs=1000):
+                          device=torch.device("cpu"), num_runs=10000):
     device = torch.device("cpu")
 
     mat_a_size = (1, mat_len)
