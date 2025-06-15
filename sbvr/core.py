@@ -743,20 +743,19 @@ class sbvr(torch.nn.Module):
             
         
 
-        if cpu_kernel:                      # <-- NEW ❶
+        if cpu_kernel and bvr.shape[1] > 1: 
             # ---------- ① BVR 16-lane pack --------------------------
             bits_per_bvr = self._get_bvr_num_bits() # 8          
             K_total      = self._get_padded_data_shape()[-1] # K_total
             N_LANE       = 16
-            K_PER_BVR     = self.bvr_len // bits_per_bvr # 256 // 8 = 32
+            # K_PER_BVR     = self.bvr_len // bits_per_bvr # 256 // 8 = 32
 
 
             bvr_pk = (bvr
-                    # .view(self.num_sums, -1, N_LANE, K_total // self._get_bvr_num_bits())   # (num_sums, num_bvr, N_LANE, bvr_len // num_bits)
-                    # .permute(1, 3, 0, 2)  # (num_sums, bvr_len // num_bits, num_sums, N_LANE)
-                    .view(self.num_sums, -1, K_total // self.bvr_len, K_PER_BVR)   # (num_sums, N, K_total // bvr_len, K_PER_BVR)
-                    .permute(1, 2, 0, 3)  # (N, K_total // bvr_len, num_sums, K_PER_BVR)
-                    .contiguous())
+                    .view(self.num_sums, -1, N_LANE, K_total // self._get_bvr_num_bits())   # (num_sums, num_bvr, N_LANE, bvr_len // num_bits)
+                    .permute(1, 3, 0, 2).contiguous())  # (num_sums, bvr_len // num_bits, num_sums, N_LANE)
+                    # .view(self.num_sums, -1, K_total // self.bvr_len, K_PER_BVR)   # (num_sums, N, K_total // bvr_len, K_PER_BVR)
+                    # .permute(1, 2, 0, 3)  # (N, K_total // bvr_len, num_sums, K_PER_BVR).contiguous()
 
             self.bvr = torch.nn.Parameter(bvr_pk, requires_grad=False)
 
@@ -766,13 +765,12 @@ class sbvr(torch.nn.Module):
 
             coeff_idx = self.coeff_idx.view((-1, K_total // self.bvr_len))
 
-            if bvr_pk.shape[0] == 1:
-                coeff_idx = coeff_idx.transpose(0, 1).contiguous() ##########
+            # if bvr_pk.shape[0] == 1:
+            #     coeff_idx = coeff_idx.transpose(0, 1).contiguous() ##########
 
             self.coeff_idx = torch.nn.Parameter(coeff_idx,
                                                 requires_grad=False)
-
-
+            
         else:                              # <-- 원본 경로 ❷
             bvr = bvr.permute(2, 1, 0).contiguous()
 
