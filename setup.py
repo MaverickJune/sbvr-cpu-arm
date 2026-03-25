@@ -35,11 +35,28 @@ setup(
         #         ],
         #     },
         # ),
-        # CppExtension (for CPU)
+        # CppExtension (for CPU) — v1 kernel (original, uses N_LANE=16 packed layout)
         CppExtension(
             name='sbvr.sbvr_cpu',
             sources=[
                 'sbvr/kernels/sbvr_kernel.cpp',  # New CPU kernel file
+            ],
+            include_dirs=[
+                sbvr_include_dir,
+            ],
+            extra_compile_args={
+                'cxx': [
+                    '-O3',
+                    '-mcpu=native',
+                    '-ffast-math',
+                ],
+            },
+        ),
+        # [v2] CppExtension — v2 kernel (CUDA-style layout, optimized for Neoverse-V2)
+        CppExtension(
+            name='sbvr.sbvr_cpu_v2',
+            sources=[
+                'sbvr/kernels/sbvr_kernel_v2.cpp',
             ],
             include_dirs=[
                 sbvr_include_dir,

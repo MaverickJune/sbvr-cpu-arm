@@ -25,3 +25,5 @@ SGEMM_CUDA/
 cuda_hgemv/
 
 sbvr_env/
+
+.vscode/

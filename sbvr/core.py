@@ -210,7 +210,8 @@ class sbvr(torch.nn.Module):
                  sbvr_serialized: _sbvr_serialized = None,
                  verbose_level: int = 1,
                  trans: bool = False,
-                 cpu_kernel : bool = False):
+                 cpu_kernel : bool = False,
+                 cpu_kernel_v2 : bool = False):  # [v2] CUDA-style layout with uint8 for ARM
         super(sbvr, self).__init__()
         _device = device if device is not None else \
             torch.device("cuda") if torch.cuda.is_available() \
@@ -221,7 +222,8 @@ class sbvr(torch.nn.Module):
         enforce_compute_dtype = torch.float16
 
         # Added support for CPU kernel
-        if not cpu_kernel:
+        # [v2] cpu_kernel_v2 also uses uint8 dtype but CUDA-style layout
+        if not cpu_kernel and not cpu_kernel_v2:
             enforce_bvr_dtype = torch.uint32
         else:
             enforce_bvr_dtype = torch.uint8
@@ -268,8 +270,9 @@ class sbvr(torch.nn.Module):
             self.coeff_idx = None
             self.coeff_cache = None
             self.input_coeff = None
+            # [v2] pass cpu_kernel_v2 flag to _encode_to_sbvr
             self._encode_to_sbvr(data.to(_device).to(self.compute_dtype), 
-                                 enc_conf, cpu_kernel)
+                                 enc_conf, cpu_kernel, cpu_kernel_v2)
         else:
             if not isinstance(sbvr_serialized, _sbvr_serialized):
                 raise ValueError(
@@ -646,7 +649,7 @@ class sbvr(torch.nn.Module):
         return best_coeff_idx, best_coeff_sel
     
     @torch.inference_mode()
-    def _encode_to_sbvr(self, data, enc_conf, cpu_kernel):
+    def _encode_to_sbvr(self, data, enc_conf, cpu_kernel, cpu_kernel_v2=False):  # [v2] added cpu_kernel_v2 param
         if data.device.type == 'cuda':
             elem_size = torch.tensor(0, dtype=self.compute_dtype).element_size()
             diff_mat_size = 3 * enc_conf.extend_ratio * (2**self.num_sums) \
@@ -743,7 +746,8 @@ class sbvr(torch.nn.Module):
             
         
 
-        if cpu_kernel and bvr.shape[1] > 1: 
+        # [v2] cpu_kernel_v2 uses the CUDA-style layout (else path), not the v1 N_LANE=16 packing
+        if cpu_kernel and not cpu_kernel_v2 and bvr.shape[1] > 1: 
             # ---------- ① BVR 16-lane pack --------------------------
             bits_per_bvr = self._get_bvr_num_bits() # 8          
             K_total      = self._get_padded_data_shape()[-1] # K_total
@@ -1030,10 +1034,11 @@ def mm_T(lhs, rhs, bias):
     return _sbvr_mm_T(lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                 rhs_bvr, rhs_coeff_idx, rhs_coeff_cache, bias)
     
-def load(filename, device=None, verbose_level=1, cpu_kernel=False) -> sbvr:
+def load(filename, device=None, verbose_level=1, cpu_kernel=False, cpu_kernel_v2=False) -> sbvr:  # [v2] added cpu_kernel_v2
     serialized_sbvr = torch.load(filename)
     sbvr_obj = sbvr(sbvr_serialized=serialized_sbvr, 
-                    verbose_level=verbose_level, device=device, cpu_kernel=cpu_kernel)
+                    verbose_level=verbose_level, device=device, 
+                    cpu_kernel=cpu_kernel, cpu_kernel_v2=cpu_kernel_v2)  # [v2]
     sbvr_obj.verbose_level = verbose_level
     if verbose_level > 0:
         print(_b_str("Loaded SBVR object from: ") + filename)
