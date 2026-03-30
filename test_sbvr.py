@@ -29,7 +29,7 @@ def load_or_create_tensor(name, shape, device):
     shape_str = "_".join(map(str, shape))
     file_path = f"{out_dir}/{name}_[{shape_str}].pt"
     if os.path.exists(file_path):
-        return torch.load(file_path).to(device)
+        return torch.load(file_path, map_location=device).to(device)
     else:
         tensor = torch.randn(shape, device=device, dtype=torch.float16) * 0.3
         torch.save(tensor, file_path)

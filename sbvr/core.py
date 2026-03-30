@@ -211,7 +211,8 @@ class sbvr(torch.nn.Module):
                  verbose_level: int = 1,
                  trans: bool = False,
                  cpu_kernel : bool = False,
-                 cpu_kernel_v2 : bool = False):  # [v2] CUDA-style layout with uint8 for ARM
+                 cpu_kernel_v2 : bool = False,
+                 gpu_tensor_gen : bool = False):  # [v2] CUDA-style layout with uint8 for ARM
         super(sbvr, self).__init__()
         _device = device if device is not None else \
             torch.device("cuda") if torch.cuda.is_available() \
@@ -227,7 +228,10 @@ class sbvr(torch.nn.Module):
             enforce_bvr_dtype = torch.uint32
         else:
             enforce_bvr_dtype = torch.uint8
-            _device = torch.device("cpu")
+            if gpu_tensor_gen:
+                _device = torch.device("cuda:0")
+            else:
+                _device = torch.device("cpu")
         
         if data is not None and sbvr_serialized is not None:
             raise ValueError(
