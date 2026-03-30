@@ -466,6 +466,8 @@ simd_kernel_ver2( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
 
 }
 
+// bvr shape: [N/N_LANE, K/8, num_sums, N_LANE]
+// coeff_idx shape: [K / BVR_LEN, N]
 template<
     typename  LIndexT, typename  RIndexT,
     int       LNumSums, int      RNumSums>

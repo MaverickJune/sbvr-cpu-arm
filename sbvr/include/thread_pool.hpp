@@ -20,6 +20,9 @@ public:
             n_threads = hw ? static_cast<int>(hw) : 4;
         }
 
+        // print n_threads
+        printf("ThreadPool: using %d threads\n", n_threads);
+
         workers_.reserve(n_threads);
 
         for (int id = 0; id < n_threads; ++id) {

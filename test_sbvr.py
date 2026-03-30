@@ -481,7 +481,6 @@ def sbvr_cpu_matmul_time_test(mat_len=512, sbvr_max_sums=4,
               + f"{sbvr_time[key]*10e6:.4f} usecs"
               + y_str(" vs ") + f"{f16_time*10e6:.4f} usecs")
         print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time[key]:.4f}x")
-        
 
 # [v2] Benchmark test: fp16 naive CPU matmul vs SBVR v2 ARM CPU kernel
 def sbvr_cpu_v2_matmul_time_test(mat_len=512, sbvr_max_sums=4, 
@@ -641,25 +640,81 @@ def sbvr_online_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
         print(b_str(f"Case {i+1}: Conversion to " + f"SBVR {key} bits"))
         print_errors(f16_matmul, value)
         print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
+        
+##############################
+# Functions below are used for actual testing and benchmarking for sbvr kcc submission
+##############################
+def sbvr_cpu_v1_matmul_time_test_final(
+    mat_len=512,
+    l_num_sums=4,
+    r_num_sums=4,
+    num_runs=10000
+):
+    device = torch.device("cpu")
+    
+    # Run FP16 matmul for reference
+    mat_a_size = (1, mat_len)
+    mat_b_size = (mat_len, mat_len)
+    mat_a = load_or_create_tensor(f"matrix_a_{mat_len}_{l_num_sums}_v1", mat_a_size, device)
+    mat_b = load_or_create_tensor(f"matrix_b_{mat_len}_{r_num_sums}_v1", mat_b_size, device)
+    # bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
+    bias = torch.zeros((mat_b.size(0),), dtype=torch.float16, device=device)
+    
+    for i in range(10):
+        f16_matmul = mat_a @ mat_b.T + bias
+    time_start = time.perf_counter()
+    for i in range(num_runs):
+        f16_matmul = mat_a @ mat_b.T + bias
+    f16_time = (time.perf_counter() - time_start) / num_runs
+    
+    # RUN SBVR v1 CPU kernel matmul
+    mat_a_sbvr = load_or_create_sbvr(f"matrix_a_{mat_len}_{l_num_sums}_v1", mat_a.shape,
+                                     device, l_num_sums, verbose_level=1, cpu_kernel=True)
+    mat_b_sbvr = load_or_create_sbvr(f"matrix_b_{mat_len}_{r_num_sums}_v1", mat_b.shape,
+                                     device, r_num_sums, verbose_level=1, cpu_kernel=True)
+    lhs_bvr = mat_a_sbvr.bvr
+    lhs_coeff_idx = mat_a_sbvr.coeff_idx
+    lhs_coeff_cache = mat_a_sbvr.coeff_cache
+    rhs_bvr = mat_b_sbvr.bvr
+    rhs_coeff_idx = mat_b_sbvr.coeff_idx
+    rhs_coeff_cache = mat_b_sbvr.coeff_cache
 
+    for _ in range(10):
+        sbvr_matmul = sbvr._sbvr_cpu_mm_T(
+                                lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                bias)
+
+    time_start = time.perf_counter()
+    for _ in range(num_runs):
+        sbvr_matmul = sbvr._sbvr_cpu_mm_T(
+                                lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                bias)
+    sbvr_time = (time.perf_counter() - time_start) / num_runs
+    
+    # Printout results
+    print(y_str("Matrix A Size: ") + str(mat_a_size) + ", " +
+          y_str("Matrix B Size: ") + str(mat_b_size))
+    print(b_str(f"fp16 matmul vs SBVR v1 {l_num_sums},{r_num_sums} bits"))
+    print_errors(f16_matmul, sbvr_matmul)
+    print(y_str("\tMatmul time taken: ")
+          + f"{sbvr_time*10e6:.4f} usecs"
+          + y_str(" vs ") + f"{f16_time*10e6:.4f} usecs")
+    print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time:.4f}x")
+    
 if __name__ == "__main__":
     torch.manual_seed(0)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     mat_len = sys.argv[1]
-    sbvr_max_sums = sys.argv[2]
-    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-
-    # sbvr_rd_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device, no_numsums_iter=True)
-    # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    l_num_sums = sys.argv[2]
+    r_num_sums = sys.argv[3]
     sbvr._sbvr_neon_test()
-    sbvr_cpu_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=torch.device("cpu"))
+    
+    sbvr_cpu_v1_matmul_time_test_final(int(mat_len), int(l_num_sums), int(r_num_sums), num_runs=1000)
+    
+    # sbvr_cpu_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=torch.device("cpu"))
     # [v2] Run v2 ARM CPU kernel benchmark
-    sbvr_cpu_v2_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=torch.device("cpu"))
+    # sbvr_cpu_v2_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=torch.device("cpu"))
     # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
     # os.system(f"rm -rf {out_dir}")
