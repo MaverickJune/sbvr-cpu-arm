@@ -608,7 +608,7 @@ void launch_cpu_sbvr_mm_1xN(
         (r_num_sums >= 2 && r_num_sums <= 10);
 
     
-    if (supported_num_sums && use_l_uint8 && use_r_uint8) {
+    if (supported_num_sums) {
         // Use uint8_t for both left and right BVRs
         if(use_l_uint8 && use_r_uint8) {
             launch_cpu_sbvr_kernel_wrapper<uint8_t, uint8_t>(
