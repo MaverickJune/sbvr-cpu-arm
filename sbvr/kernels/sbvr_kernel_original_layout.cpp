@@ -55,7 +55,6 @@ struct WorkerArg {
     __fp16* out_pack;      // (N / N_LANE)
 
     int N;                 // Total number of output columns
-    int N_global;          // Global N (for indexing r_coeff_idx)
     int K;                 // Number of features
 
 };
@@ -262,7 +261,7 @@ simd_kernel_1xN_popc_first( const uint8_t* __restrict l_bvr,        // (K, LNumS
 
                   const __fp16* __restrict bias_pack,     // (N_LANE)
                   __fp16*       __restrict out_pack,       // (N_LANE)
-                  int N, int N_global, int K)      
+                  int N, int K)      
 {
 
     for(int n = 0; n < N; n += N_LANE) {
@@ -285,7 +284,7 @@ simd_kernel_1xN_popc_first( const uint8_t* __restrict l_bvr,        // (K, LNumS
             const int l_coeff_i = l_coeff_idx[bvr_idx];
 
             for(int nn = 0; nn < N_LANE; ++nn) {
-                const int r_coeff_i = r_coeff_idx[bvr_idx * N_global + (n + nn)]; // r_coeff_idx shape: [K / BVR_LEN, N]
+                const int r_coeff_i = r_coeff_idx[(n + nn) * bvr_per_K + bvr_idx];
                 const __fp16* src = r_coeff_cache + r_coeff_i * RNumSums;
                 for (int r = 0; r < RNumSums; ++r)
                     lane_tile[r][nn] = src[r];
@@ -467,7 +466,7 @@ simd_kernel_ver2( const uint8_t* __restrict l_bvr,        // (K, LNumSums)
 }
 
 // bvr shape: [N/N_LANE, K/8, num_sums, N_LANE]
-// coeff_idx shape: [N, K / BVR_LEN]
+// coeff_idx shape: [K / BVR_LEN, N]
 template<
     typename  LIndexT, typename  RIndexT,
     int       LNumSums, int      RNumSums>
@@ -493,7 +492,7 @@ void sbvr_mm_cpu_1xN(
 
         uint8_t* r_pack = r_bvr + n0 * K * RNumSums;
 
-        RIndexT* r_coeff_idx_pack = (RIndexT*)r_coeff_idx + n0;
+        RIndexT* r_coeff_idx_pack = (RIndexT*)r_coeff_idx + n0 * bvr_per_K;
 
         __fp16* out_pack = out + n0;
         __fp16* bias_pack = bias ? bias + n0 : nullptr;
@@ -517,7 +516,7 @@ void sbvr_mm_cpu_1xN(
             bias_pack,
             out_pack,
 
-            n_items, N, K
+            n_items, K
         });
 
         ++n_tasks;
@@ -534,7 +533,7 @@ void sbvr_mm_cpu_1xN(
             arg.r_coeff_cache,
             arg.bias_pack,
             arg.out_pack,
-            arg.N, arg.N_global, arg.K);
+            arg.N, arg.K);
     });
 }
 

@@ -8,7 +8,7 @@ import os
 # import sbvr.sbvr_cuda
 # import sbvr.sbvr_cpu
 
-out_dir = "data"
+out_dir = "data_tp_layout" # "data_tp_layout", "data"
 os.makedirs(out_dir, exist_ok=True)
 
 def r_str(s):
@@ -736,7 +736,5 @@ if __name__ == "__main__":
     # sbvr_cpu_v1_matmul_time_test_final(mat_len=8192, l_num_sums=8, r_num_sums=8, num_runs=1000)
     
     # Part 3: Individual extra testing
-    sbvr_cpu_v1_matmul_time_test_final(mat_len=2048, l_num_sums=8, r_num_sums=8, num_runs=1000)
-    sbvr_cpu_v1_matmul_time_test_final(mat_len=4096, l_num_sums=8, r_num_sums=8, num_runs=1000)
-    sbvr_cpu_v1_matmul_time_test_final(mat_len=8192, l_num_sums=8, r_num_sums=8, num_runs=1000)
+    sbvr_cpu_v1_matmul_time_test_final(mat_len=4096, l_num_sums=4, r_num_sums=4, num_runs=1000)
    
