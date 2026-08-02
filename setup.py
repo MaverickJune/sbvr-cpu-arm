@@ -39,7 +39,7 @@ setup(
         CppExtension(
             name='sbvr.sbvr_cpu',
             sources=[
-                'sbvr/kernels/sbvr_kernel.cpp',  # New CPU kernel file
+                'sbvr/kernels/sbvr_kernel_no_ovf.cpp',  # New CPU kernel file # sbvr/kernels/sbvr_kernel.cpp # sbvr/kernels/sbvr_kernel_no_ovf.cpp
             ],
             include_dirs=[
                 sbvr_include_dir,
